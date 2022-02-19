@@ -1,0 +1,2 @@
+#!/bin/sh
+mate-terminal --window --working-directory="/sda5/sda5/Tools/Projects/Sample/TCP_IP/ntools/npush/" --command="/sda5/sda5/Tools/Projects/Sample/TCP_IP/ntools/npush/npush \"$CAJA_SCRIPT_SELECTED_FILE_PATHS\""

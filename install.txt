@@ -1,0 +1,26 @@
+----- Linux: ---------------------------------------------------------------
+
+Für NPush:
+Die Datei: "send_to_npush" kopieren nach : ~/.config/caja/scripts
+
+für NPoll:
+in der Datei ~/.bashrc die Zeile: 
+
+export PATH=/sda5/sda5/Tools/Projects/Sample/TCP_IP/ntools/npoll:$PATH
+
+einfügen.
+
+
+----- Windows: -------------------------------------------------------------
+
+Für NPush:
+Eine Verknüfung auf npush in "sendto" ablegen
+
+für NPoll:
+Mittels Regedit:   Computer\HKEY_CLASSES_ROOT\Directory\Background\shell\
+  neuen Schlüssel "npoll" anlegen
+  in "npoll" neuen Schlüssel "command" anlegen
+  in command den Eintrag "default" Editieren und auf die Datei "npoll.exe" setzen.
+  
+  (Quelle: https://www.techspot.com/guides/1670-windows-right-click-menu/ )
+
