@@ -2,7 +2,7 @@ Assuming you are part of a company or at the university where lots of people are
 
 - Create a place where both users have read / write access
 - Copy the files to the place
-- copy the files from the place to your local device
+- Copy the files from the place to your local device
 
 This process is not even always possible and really anoying.
 
