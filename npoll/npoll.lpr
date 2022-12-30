@@ -18,6 +18,7 @@ Var
   Port: Integer;
 
 Begin
+  writeln('npoll ver. ' + Version + ' by Corpsman, www.Corpsman.de');
   logger.LogToConsole := true;
   logger.LogToFile := false;
   logger.SetLogLevel(4);
@@ -29,7 +30,7 @@ Begin
     If (lowercase(ParamStr(i)) = '-h') Or
       (lowercase(ParamStr(i)) = '-help') Or
       (lowercase(ParamStr(i)) = '-?') Then Begin
-      writeln('npoll ver. ' + Version + ' by Corpsman, www.Corpsman.de online help');
+      writeln('Online help');
       writeln('Usage "npoll [Option]');
       writeln('Options :');
       writeln('-l <value> : Set Loglevel to value (valid 0..6) default = 4');

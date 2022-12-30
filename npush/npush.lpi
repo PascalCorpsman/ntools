@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <CONFIG>
   <ProjectOptions>
     <Version Value="12"/>
@@ -44,7 +44,7 @@
         <PackageName Value="lnetbase"/>
       </Item2>
     </RequiredPackages>
-    <Units Count="7">
+    <Units Count="6">
       <Unit0>
         <Filename Value="npush.lpr"/>
         <IsPartOfProject Value="True"/>
@@ -69,10 +69,6 @@
         <Filename Value="..\..\uip.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit5>
-      <Unit6>
-        <Filename Value="..\ulogger.pas"/>
-        <IsPartOfProject Value="True"/>
-      </Unit6>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

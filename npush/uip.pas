@@ -44,6 +44,8 @@ Function CalculateBroadCastAddressFromAddress(Address, SubnetMask: String): Stri
  *)
 Function StrToIPAddress(Value: String): TIPAddress;
 
+Function IsNetworkPresent(): Boolean;
+
 Implementation
 
 Uses
@@ -60,6 +62,18 @@ Begin
     If Not (strtointdef(t[i], -1) In [0..255]) Then Raise Exception.Create('Invalid ip:' + Value);
     result[i] := strtointdef(t[i], -1);
   End;
+End;
+
+Function IsNetworkPresent: Boolean;
+Var
+  blub: TNetworkAdapterList;
+Begin
+  blub := GetLocalIPs();
+  result := assigned(blub);
+  If length(blub) = 1 Then Begin
+    If blub[0].IpAddress = '127.0.0.1' Then result := false;
+  End;
+  setlength(blub, 0);
 End;
 
 Function GetLocalIPs: TNetworkAdapterList;

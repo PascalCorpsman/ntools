@@ -5,6 +5,7 @@
 Uses
 {$IFDEF UNIX}{$IFDEF UseCThreads}
   cthreads,
+  cmem,
 {$ENDIF}{$ENDIF}
   Classes, sysutils, unpush, ulogger, lNet
   ;
@@ -18,6 +19,7 @@ Var
   BIP: String;
 
 Begin
+  writeln('npush ver. ' + Version + ' by Corpsman, www.Corpsman.de');
   logger.LogToConsole := true;
   logger.LogToFile := false;
   logger.SetLogLevel(4);
@@ -30,7 +32,7 @@ Begin
     If (lowercase(ParamStr(i)) = '-h') Or
       (lowercase(ParamStr(i)) = '-help') Or
       (lowercase(ParamStr(i)) = '-?') Then Begin // Print Help
-      writeln('npush ver. ' + Version + ' by Corpsman, www.Corpsman.de online help');
+      writeln('Online help');
       writeln('');
       writeln('Always start npoll first');
       writeln('');

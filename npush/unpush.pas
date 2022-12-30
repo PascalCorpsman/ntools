@@ -502,6 +502,7 @@ Var
   Buffer: Array[0..BufferSize - 1] Of byte;
   i, Cnt: integer;
   i64: int64;
+
 Begin
   Case fState Of
     psTransferFiles: Begin

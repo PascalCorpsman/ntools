@@ -44,7 +44,7 @@
         <PackageName Value="lnetbase"/>
       </Item2>
     </RequiredPackages>
-    <Units Count="7">
+    <Units Count="5">
       <Unit0>
         <Filename Value="npoll.lpr"/>
         <IsPartOfProject Value="True"/>
@@ -54,25 +54,17 @@
         <IsPartOfProject Value="True"/>
       </Unit1>
       <Unit2>
-        <Filename Value="C:\DatenSteuerung\ulogger.pas"/>
+        <Filename Value="..\ntools.inc"/>
         <IsPartOfProject Value="True"/>
       </Unit2>
       <Unit3>
-        <Filename Value="..\ntools.inc"/>
+        <Filename Value="ulogger.inc"/>
         <IsPartOfProject Value="True"/>
       </Unit3>
       <Unit4>
         <Filename Value="..\..\..\DatenSteuerung\ulogger.pas"/>
         <IsPartOfProject Value="True"/>
       </Unit4>
-      <Unit5>
-        <Filename Value="ulogger.inc"/>
-        <IsPartOfProject Value="True"/>
-      </Unit5>
-      <Unit6>
-        <Filename Value="..\ulogger.pas"/>
-        <IsPartOfProject Value="True"/>
-      </Unit6>
     </Units>
   </ProjectOptions>
   <CompilerOptions>

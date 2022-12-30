@@ -203,7 +203,7 @@ Begin
           HandleReceiveFiles;
         End;
     End;
-    If fNeedRestart Then Begin
+    If fNeedRestart and frunning Then Begin
       fNeedRestart := false;
       Restart;
     End;
@@ -229,147 +229,175 @@ Var
   i: integer;
   Cnt: int64;
   strLen: integer;
+  (*
+   * The Automatic Resend feature of Lnet is broken, so wie "fake" a automatik resend feature with this boolean.
+   *)
+  SomethingWasRead: Boolean;
 Begin
-  Case fState Of
-    psReceiveFiles: Begin
-        Case fFileReceiveInfo.FileReceiveState Of
-          frsReceiveFile: Begin
-              Repeat
-                cnt := min(BufferSize, fFileReceiveInfo.FileSize - fFileReceiveInfo.Position);
+  Repeat
+    SomethingWasRead := false;
+    Case fState Of
+      psReceiveFiles: Begin
+          Case fFileReceiveInfo.FileReceiveState Of
+            frsReceiveFile: Begin
+                Repeat
+                  cnt := min(BufferSize, fFileReceiveInfo.FileSize - fFileReceiveInfo.Position);
+                  If cnt > 0 Then Begin
+                    cnt := aSocket.Get(buffer, cnt);
+                    If cnt > 0 Then Begin
+                      SomethingWasRead := true;
+                      fFileReceiveInfo.AktualFile.Write(buffer, cnt);
+                      fFileReceiveInfo.Position := fFileReceiveInfo.Position + cnt;
+                    End;
+                  End;
+                  If fFileReceiveInfo.Position >= fFileReceiveInfo.FileSize Then Begin
+                    cnt := 0;
+                    fFileReceiveInfo.AktualFile.free;
+                    fFileReceiveInfo.AktualFile := Nil;
+                    fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
+                  End;
+                Until cnt = 0;
+              End;
+            frsWaitForNextFile: Begin
+                cnt := aSocket.Get(buffer, 1); // Lesen des gesammten Headers
                 If cnt > 0 Then Begin
-                  cnt := aSocket.Get(buffer, cnt);
-                  fFileReceiveInfo.AktualFile.Write(buffer, cnt);
-                  fFileReceiveInfo.Position := fFileReceiveInfo.Position + cnt;
+                  SomethingWasRead := true;
+                  If Buffer[0] = 27 Then Begin
+                    // Reguläres Ende
+                    log('File transfer finished.', llTrace);
+                    If StayOpen Then Begin
+                      fNeedRestart := true;
+                    End
+                    Else Begin
+                      frunning := false;
+                      SomethingWasRead := false; // We want to close so no need of further checkings.!
+                    End;
+                  End;
+                  If (Buffer[0] = 1) Or (Buffer[0] = 9) Then Begin
+                    // Umschalten auf Empfangen der Metadaten und auswerten dieser
+                    fFileReceiveInfo.CheckMD5 := true;
+                    fFileReceiveInfo.AppendData := Buffer[0] = 9;
+                    fFileReceiveInfo.HeaderHeaderBytesPointer := 0;
+                    fFileReceiveInfo.FileReceiveState := frsReceiveHeader;
+                  End;
+                  If (Buffer[0] = 2) Or (Buffer[0] = 10) Then Begin
+                    // Umschalten auf Empfangen der Metadaten und auswerten dieser
+                    fFileReceiveInfo.CheckMD5 := false;
+                    fFileReceiveInfo.AppendData := Buffer[0] = 10;
+                    fFileReceiveInfo.HeaderHeaderBytesPointer := 0;
+                    fFileReceiveInfo.FileReceiveState := frsReceiveHeader;
+                  End;
+                End
+                Else Begin
+                  frunning := false;
+                  SomethingWasRead := false; // We want to close so no need of further checkings.!
                 End;
-                If fFileReceiveInfo.Position >= fFileReceiveInfo.FileSize Then Begin
-                  cnt := 0;
-                  fFileReceiveInfo.AktualFile.free;
-                  fFileReceiveInfo.AktualFile := Nil;
-                  fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
+              End;
+            frsReceiveHeader: Begin
+                cnt := aSocket.Get(buffer, 28 - fFileReceiveInfo.HeaderHeaderBytesPointer); // Lesen des gesammten Headers
+                If cnt > 0 Then SomethingWasRead := true;
+
+                setlength(fFileReceiveInfo.HeaderHeaderBytes, cnt + fFileReceiveInfo.HeaderHeaderBytesPointer);
+                For i := 0 To cnt - 1 Do Begin
+                  fFileReceiveInfo.HeaderHeaderBytes[fFileReceiveInfo.HeaderHeaderBytesPointer + i] := buffer[i];
                 End;
-              Until cnt = 0;
-            End;
-          frsWaitForNextFile: Begin
-              cnt := aSocket.Get(buffer, 1); // Lesen des gesammten Headers
-              If cnt <> 0 Then Begin
-                If Buffer[0] = 27 Then Begin
-                  // Reguläres Ende
-                  log('File transfer finished.', llTrace);
+                fFileReceiveInfo.HeaderHeaderBytesPointer := fFileReceiveInfo.HeaderHeaderBytesPointer + cnt;
+                If fFileReceiveInfo.HeaderHeaderBytesPointer = 28 Then Begin
+                  For i := 0 To 15 Do Begin
+                    fFileReceiveInfo.md5[i] := fFileReceiveInfo.HeaderHeaderBytes[i];
+                  End;
+                  fFileReceiveInfo.Position := 0;
+                  fFileReceiveInfo.FileSize := 0;
+                  For i := 0 To 7 Do Begin
+                    fFileReceiveInfo.FileSize := fFileReceiveInfo.FileSize Shl 8;
+                    fFileReceiveInfo.FileSize := fFileReceiveInfo.FileSize Or fFileReceiveInfo.HeaderHeaderBytes[16 + i];
+                  End;
+                  strLen := (fFileReceiveInfo.HeaderHeaderBytes[24] Shl 24) Or (fFileReceiveInfo.HeaderHeaderBytes[25] Shl 16) Or (fFileReceiveInfo.HeaderHeaderBytes[26] Shl 8) Or (fFileReceiveInfo.HeaderHeaderBytes[27] Shl 0);
+                  fFileReceiveInfo.HeaderBytesFilenameLen := strLen;
+                  fFileReceiveInfo.Filename := '';
+                  fFileReceiveInfo.FileReceiveState := frsReceiveHeaderFilename;
+                  //OnTCPReceiveEvent(aSocket); // Keine Zeit verlieren, wir lesen gleich weiter
+                End;
+              End;
+            frsReceiveHeaderFilename: Begin
+                cnt := aSocket.Get(buffer, fFileReceiveInfo.HeaderBytesFilenameLen - length(fFileReceiveInfo.Filename));
+                If cnt > 0 Then SomethingWasRead := true;
+
+                For i := 0 To cnt - 1 Do Begin
+                  fFileReceiveInfo.Filename := fFileReceiveInfo.Filename + chr(buffer[i]);
+                End;
+                If length(fFileReceiveInfo.Filename) = fFileReceiveInfo.HeaderBytesFilenameLen Then Begin
+                  HandleCheckIfFileNeedsToBeTransfered;
+                End;
+              End;
+          End;
+        End;
+      psWaitForExecutionCommand: Begin
+          cnt := aSocket.Get(buffer, 1);
+          If cnt > 0 Then Begin
+            SomethingWasRead := true;
+            Case buffer[0] Of
+              ord('0'): Begin // Nur ein Ping und wieder Beenden
+                  aSocket.SendMessage('Ping');
+                  logshow('Got ping from : ' + aSocket.PeerAddress, llInfo);
                   If StayOpen Then Begin
                     fNeedRestart := true;
                   End
                   Else Begin
                     frunning := false;
+                    SomethingWasRead := false; // We want to close so no need of further checkings.!
                   End;
                 End;
-                If (Buffer[0] = 1) Or (Buffer[0] = 9) Then Begin
-                  // Umschalten auf Empfangen der Metadaten und auswerten dieser
-                  fFileReceiveInfo.CheckMD5 := true;
-                  fFileReceiveInfo.AppendData := Buffer[0] = 9;
-                  fFileReceiveInfo.HeaderHeaderBytesPointer := 0;
-                  fFileReceiveInfo.FileReceiveState := frsReceiveHeader;
+              ord('1'): Begin // Umschalten in Chat Modus
+                  fState := psChat;
+                  logshow('Open chat mode, press ESC to exit.', llInfo);
                 End;
-                If (Buffer[0] = 2) Or (Buffer[0] = 10) Then Begin
-                  // Umschalten auf Empfangen der Metadaten und auswerten dieser
-                  fFileReceiveInfo.CheckMD5 := false;
-                  fFileReceiveInfo.AppendData := Buffer[0] = 10;
-                  fFileReceiveInfo.HeaderHeaderBytesPointer := 0;
-                  fFileReceiveInfo.FileReceiveState := frsReceiveHeader;
-                End;
+              ord('2'): Begin
+                  fState := psReceiveFiles;
+                  log('Receive files', llTrace);
+                  If assigned(fFileReceiveInfo.AktualFile) Then fFileReceiveInfo.AktualFile.free;
+                  fFileReceiveInfo.AktualFile := Nil;
+                  fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
+                End
+            Else Begin
+                log('Unknown command : "' + chr(Buffer[0]) + '"', llWarning);
+                frunning := false;
+                SomethingWasRead := false; // We want to close so no need of further checkings.!
+              End;
+            End;
+          End
+          Else Begin
+            frunning := false;
+            SomethingWasRead := false; // We want to close so no need of further checkings.!
+          End;
+        End;
+      psChat: Begin
+          Repeat
+            cnt := aSocket.Get(buffer, length(Buffer));
+            If cnt > 0 Then SomethingWasRead := true;
+
+            For i := 0 To cnt - 1 Do Begin
+              If Buffer[i] = 13 Then Begin
+                WriteLn('');
               End
               Else Begin
-                frunning := false;
-              End;
-            End;
-          frsReceiveHeader: Begin
-              cnt := aSocket.Get(buffer, 28 - fFileReceiveInfo.HeaderHeaderBytesPointer); // Lesen des gesammten Headers
-              setlength(fFileReceiveInfo.HeaderHeaderBytes, cnt + fFileReceiveInfo.HeaderHeaderBytesPointer);
-              For i := 0 To cnt - 1 Do Begin
-                fFileReceiveInfo.HeaderHeaderBytes[fFileReceiveInfo.HeaderHeaderBytesPointer + i] := buffer[i];
-              End;
-              fFileReceiveInfo.HeaderHeaderBytesPointer := fFileReceiveInfo.HeaderHeaderBytesPointer + cnt;
-              If fFileReceiveInfo.HeaderHeaderBytesPointer = 28 Then Begin
-                For i := 0 To 15 Do Begin
-                  fFileReceiveInfo.md5[i] := fFileReceiveInfo.HeaderHeaderBytes[i];
-                End;
-                fFileReceiveInfo.Position := 0;
-                fFileReceiveInfo.FileSize := 0;
-                For i := 0 To 7 Do Begin
-                  fFileReceiveInfo.FileSize := fFileReceiveInfo.FileSize Shl 8;
-                  fFileReceiveInfo.FileSize := fFileReceiveInfo.FileSize Or fFileReceiveInfo.HeaderHeaderBytes[16 + i];
-                End;
-                strLen := (fFileReceiveInfo.HeaderHeaderBytes[24] Shl 24) Or (fFileReceiveInfo.HeaderHeaderBytes[25] Shl 16) Or (fFileReceiveInfo.HeaderHeaderBytes[26] Shl 8) Or (fFileReceiveInfo.HeaderHeaderBytes[27] Shl 0);
-                fFileReceiveInfo.HeaderBytesFilenameLen := strLen;
-                fFileReceiveInfo.Filename := '';
-                fFileReceiveInfo.FileReceiveState := frsReceiveHeaderFilename;
-                OnTCPReceiveEvent(aSocket); // Keine Zeit verlieren, wir lesen gleich weiter
-              End;
-            End;
-          frsReceiveHeaderFilename: Begin
-              cnt := aSocket.Get(buffer, fFileReceiveInfo.HeaderBytesFilenameLen - length(fFileReceiveInfo.Filename));
-              For i := 0 To cnt - 1 Do Begin
-                fFileReceiveInfo.Filename := fFileReceiveInfo.Filename + chr(buffer[i]);
-              End;
-              If length(fFileReceiveInfo.Filename) = fFileReceiveInfo.HeaderBytesFilenameLen Then Begin
-                HandleCheckIfFileNeedsToBeTransfered;
-              End;
-            End;
-        End;
-      End;
-    psWaitForExecutionCommand: Begin
-        cnt := aSocket.Get(buffer, 1);
-        If cnt <> 0 Then Begin
-          Case buffer[0] Of
-            ord('0'): Begin // Nur ein Ping und wieder Beenden
-                aSocket.SendMessage('Ping');
-                logshow('Got ping from : ' + aSocket.PeerAddress, llInfo);
-                If StayOpen Then Begin
-                  fNeedRestart := true;
+                If buffer[i] = 27 Then Begin
+                  frunning := false;
+                  SomethingWasRead := false; // We want to close so no need of further checkings.!
                 End
                 Else Begin
-                  frunning := false;
+                  write(chr(buffer[i]));
                 End;
               End;
-            ord('1'): Begin // Umschalten in Chat Modus
-                fState := psChat;
-                logshow('Open chat mode, press ESC to exit.', llInfo);
-              End;
-            ord('2'): Begin
-                fState := psReceiveFiles;
-                log('Receive files', llTrace);
-                If assigned(fFileReceiveInfo.AktualFile) Then fFileReceiveInfo.AktualFile.free;
-                fFileReceiveInfo.AktualFile := Nil;
-                fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
-              End
-          Else Begin
-              log('Unknown command : "' + chr(Buffer[0]) + '"', llWarning);
-              frunning := false;
             End;
-          End;
-        End
-        Else Begin
-          frunning := false;
+          Until cnt = 0;
         End;
-      End;
-    psChat: Begin
-        Repeat
-          cnt := aSocket.Get(buffer, length(Buffer));
-          For i := 0 To cnt - 1 Do Begin
-            If Buffer[i] = 13 Then Begin
-              WriteLn('');
-            End
-            Else Begin
-              If buffer[i] = 27 Then Begin
-                frunning := false;
-              End
-              Else Begin
-                write(chr(buffer[i]));
-              End;
-            End;
-          End;
-        Until cnt = 0;
-      End;
-  End;
+    End;
+    (*
+     * Wenn man wüsste wie ausgelesen werden kann ob im "Puffer" noch daten stehen wäre das natürlich besser,
+     * aber so gehts auch ..
+     *)
+  Until Not SomethingWasRead;
 End;
 
 Procedure TNPoll.OnTCPDisconnect(aSocket: TLSocket);
