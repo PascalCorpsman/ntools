@@ -11,8 +11,9 @@ Const
    *            0.06 = die LCL hat sich geändert, daher waren Anpassungen notwendig
    *            0.07 = npush sendet den UDP-Broadcast nun auf allen Adaptern
    *            0.08 = OnReceive Auswertung von npoll musste angepasst werden.
+   *            0.09 = ver 0.08 war immer noch nicht "korrekt", nun wieder getestet auf windows / Linux
    *)
-  Version = '0.08';
+  Version = '0.09';
   //  BufferSize = 32768; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
   BufferSize = 16384; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 12.000.000
   //  BufferSize = 8192;  // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
