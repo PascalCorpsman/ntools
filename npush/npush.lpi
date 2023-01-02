@@ -25,13 +25,13 @@
     </PublishOptions>
     <RunParams>
       <local>
-        <CommandLineParams Value="lib"/>
+        <CommandLineParams Value="\sda5\sda5\Spiele\DLS_v0.38_x86_64_Linux.zip"/>
       </local>
       <FormatVersion Value="2"/>
       <Modes Count="1">
         <Mode0 Name="default">
           <local>
-            <CommandLineParams Value="lib"/>
+            <CommandLineParams Value="\sda5\sda5\Spiele\DLS_v0.38_x86_64_Linux.zip"/>
           </local>
         </Mode0>
       </Modes>

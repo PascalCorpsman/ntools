@@ -203,7 +203,7 @@ Begin
           HandleReceiveFiles;
         End;
     End;
-    If fNeedRestart and frunning Then Begin
+    If fNeedRestart Then Begin
       fNeedRestart := false;
       Restart;
     End;
@@ -232,10 +232,10 @@ Var
   (*
    * The Automatic Resend feature of Lnet is broken, so wie "fake" a automatik resend feature with this boolean.
    *)
-  SomethingWasRead: Boolean;
+  SomethingWasReceived: Boolean;
 Begin
   Repeat
-    SomethingWasRead := false;
+    SomethingWasReceived := false;
     Case fState Of
       psReceiveFiles: Begin
           Case fFileReceiveInfo.FileReceiveState Of
@@ -245,7 +245,7 @@ Begin
                   If cnt > 0 Then Begin
                     cnt := aSocket.Get(buffer, cnt);
                     If cnt > 0 Then Begin
-                      SomethingWasRead := true;
+                      SomethingWasReceived := true;
                       fFileReceiveInfo.AktualFile.Write(buffer, cnt);
                       fFileReceiveInfo.Position := fFileReceiveInfo.Position + cnt;
                     End;
@@ -255,13 +255,14 @@ Begin
                     fFileReceiveInfo.AktualFile.free;
                     fFileReceiveInfo.AktualFile := Nil;
                     fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
+                    SomethingWasReceived := true; // TODO: Macht das sinn ?
                   End;
                 Until cnt = 0;
               End;
             frsWaitForNextFile: Begin
                 cnt := aSocket.Get(buffer, 1); // Lesen des gesammten Headers
-                If cnt > 0 Then Begin
-                  SomethingWasRead := true;
+                If cnt > 0 Then SomethingWasReceived := true;
+                If cnt <> 0 Then Begin
                   If Buffer[0] = 27 Then Begin
                     // Reguläres Ende
                     log('File transfer finished.', llTrace);
@@ -270,7 +271,6 @@ Begin
                     End
                     Else Begin
                       frunning := false;
-                      SomethingWasRead := false; // We want to close so no need of further checkings.!
                     End;
                   End;
                   If (Buffer[0] = 1) Or (Buffer[0] = 9) Then Begin
@@ -289,14 +289,13 @@ Begin
                   End;
                 End
                 Else Begin
-                  frunning := false;
-                  SomethingWasRead := false; // We want to close so no need of further checkings.!
+//                  frunning := false;
                 End;
               End;
             frsReceiveHeader: Begin
                 cnt := aSocket.Get(buffer, 28 - fFileReceiveInfo.HeaderHeaderBytesPointer); // Lesen des gesammten Headers
-                If cnt > 0 Then SomethingWasRead := true;
-
+                if fFileReceiveInfo.HeaderHeaderBytesPointer = 28 then SomethingWasReceived := true;
+                If cnt > 0 Then SomethingWasReceived := true;
                 setlength(fFileReceiveInfo.HeaderHeaderBytes, cnt + fFileReceiveInfo.HeaderHeaderBytesPointer);
                 For i := 0 To cnt - 1 Do Begin
                   fFileReceiveInfo.HeaderHeaderBytes[fFileReceiveInfo.HeaderHeaderBytesPointer + i] := buffer[i];
@@ -321,8 +320,7 @@ Begin
               End;
             frsReceiveHeaderFilename: Begin
                 cnt := aSocket.Get(buffer, fFileReceiveInfo.HeaderBytesFilenameLen - length(fFileReceiveInfo.Filename));
-                If cnt > 0 Then SomethingWasRead := true;
-
+                If cnt > 0 Then SomethingWasReceived := true;
                 For i := 0 To cnt - 1 Do Begin
                   fFileReceiveInfo.Filename := fFileReceiveInfo.Filename + chr(buffer[i]);
                 End;
@@ -334,8 +332,8 @@ Begin
         End;
       psWaitForExecutionCommand: Begin
           cnt := aSocket.Get(buffer, 1);
-          If cnt > 0 Then Begin
-            SomethingWasRead := true;
+          If cnt > 0 Then SomethingWasReceived := true;
+          If cnt <> 0 Then Begin
             Case buffer[0] Of
               ord('0'): Begin // Nur ein Ping und wieder Beenden
                   aSocket.SendMessage('Ping');
@@ -345,7 +343,6 @@ Begin
                   End
                   Else Begin
                     frunning := false;
-                    SomethingWasRead := false; // We want to close so no need of further checkings.!
                   End;
                 End;
               ord('1'): Begin // Umschalten in Chat Modus
@@ -362,20 +359,17 @@ Begin
             Else Begin
                 log('Unknown command : "' + chr(Buffer[0]) + '"', llWarning);
                 frunning := false;
-                SomethingWasRead := false; // We want to close so no need of further checkings.!
               End;
             End;
           End
           Else Begin
             frunning := false;
-            SomethingWasRead := false; // We want to close so no need of further checkings.!
           End;
         End;
       psChat: Begin
           Repeat
             cnt := aSocket.Get(buffer, length(Buffer));
-            If cnt > 0 Then SomethingWasRead := true;
-
+            If cnt > 0 Then SomethingWasReceived := true;
             For i := 0 To cnt - 1 Do Begin
               If Buffer[i] = 13 Then Begin
                 WriteLn('');
@@ -383,7 +377,6 @@ Begin
               Else Begin
                 If buffer[i] = 27 Then Begin
                   frunning := false;
-                  SomethingWasRead := false; // We want to close so no need of further checkings.!
                 End
                 Else Begin
                   write(chr(buffer[i]));
@@ -397,7 +390,7 @@ Begin
      * Wenn man wüsste wie ausgelesen werden kann ob im "Puffer" noch daten stehen wäre das natürlich besser,
      * aber so gehts auch ..
      *)
-  Until Not SomethingWasRead;
+  Until Not SomethingWasReceived;
 End;
 
 Procedure TNPoll.OnTCPDisconnect(aSocket: TLSocket);

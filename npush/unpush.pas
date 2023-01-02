@@ -79,6 +79,11 @@ Uses ulogger, crt, FileUtil, LazUTF8, LazFileUtils, math, md5, uip;
 Const
   Welcome_Message = 'Hello';
 
+  Procedure Nop();
+  begin
+
+  end;
+
   { TNPush }
 
 Constructor TNPush.create(Port: integer);
@@ -133,7 +138,7 @@ Begin
   // 1.1 Alle Server Starten
   logger.Log('Creating Connections.', llTrace);
   frunning := true;
-  If Not fudp.Connect(''{localhost}, fPort) Then Begin // Die Windows Version funktioniert so am besten ...
+  If Not fudp.Connect('' {localhost}, fPort) Then Begin // Die Windows Version funktioniert so am besten ...
     LogShow('Could not connect to udp, abort now.', llWarning);
     frunning := false;
   End
@@ -502,75 +507,85 @@ Var
   Buffer: Array[0..BufferSize - 1] Of byte;
   i, Cnt: integer;
   i64: int64;
-
+  SomethingWasRead: Boolean;
 Begin
-  Case fState Of
-    psTransferFiles: Begin
-        Case fFileSendInfo.FileSendState Of
-          fssWaitForCRCResponse: Begin
-              cnt := aSocket.Get(buffer, 1);
-              If cnt <> 1 Then Begin
-                fRunning := false;
-                exit;
-              End;
-              Case buffer[0] Of
-                8: Begin
-                    cnt := aSocket.Get(buffer, 8);
-                    If cnt = 8 Then Begin
-                      i64 := 0;
-                      For i := 0 To 7 Do Begin
-                        i64 := i64 Shl 8;
-                        i64 := i64 Or buffer[i];
+  Repeat
+    SomethingWasRead := false;
+    Case fState Of
+      psTransferFiles: Begin
+          Case fFileSendInfo.FileSendState Of
+            fssWaitForCRCResponse: Begin
+                cnt := aSocket.Get(buffer, 1);
+                If cnt > 0 Then SomethingWasRead := true;
+                If cnt <> 1 Then Begin
+                  aSocket.Eventer.CallAction;
+                  cnt := aSocket.Get(buffer, 1);
+                  nop();
+                 // fRunning := false;
+                  exit;
+                End;
+                Case buffer[0] Of
+                  8: Begin
+                      cnt := aSocket.Get(buffer, 8);
+                      If cnt > 0 Then SomethingWasRead := true;
+                      If cnt = 8 Then Begin
+                        i64 := 0;
+                        For i := 0 To 7 Do Begin
+                          i64 := i64 Shl 8;
+                          i64 := i64 Or buffer[i];
+                        End;
+                        fFileSendInfo.Position := i64;
+                        // Die Dateiübertragung setzt fort
+                        fFileSendInfo.FileSendState := fssFileTransfering;
+                        OnTCPCanSendEvent(aSocket);
+                      End
+                      Else Begin
+                        fRunning := false;
+                        Raise Exception.Create('Verdammt FileSize nicht Vollständig empfangen.');
                       End;
-                      fFileSendInfo.Position := i64;
-                      // Die Dateiübertragung setzt fort
+                    End;
+                  ord('N'): Begin
+                      fFileSendInfo.FileSendState := fssReadyForNextFile;
+                    End;
+                  ord('Y'): Begin
+                      // Die Dateiübertragung kann Beginnen
                       fFileSendInfo.FileSendState := fssFileTransfering;
                       OnTCPCanSendEvent(aSocket);
-                    End
-                    Else Begin
-                      fRunning := false;
-                      Raise Exception.Create('Verdammt FileSize nicht Vollständig empfangen.');
                     End;
-                  End;
-                ord('N'): Begin
-                    fFileSendInfo.FileSendState := fssReadyForNextFile;
-                  End;
-                ord('Y'): Begin
-                    // Die Dateiübertragung kann Beginnen
-                    fFileSendInfo.FileSendState := fssFileTransfering;
-                    OnTCPCanSendEvent(aSocket);
-                  End;
-                ord('A'): Begin // Npoll hat ein Problem Abbruch
-                    fRunning := false;
-                  End;
+                  ord('A'): Begin // Npoll hat ein Problem Abbruch
+                      fRunning := false;
+                    End;
+                End;
               End;
-            End;
+          End;
         End;
-      End;
-    psPing: Begin
-        cnt := aSocket.Get(buffer, length(Buffer));
-        writeln('Got ping from : ' + aSocket.PeerAddress);
-        fRunning := false;
-      End;
-    psChat: Begin
-        Repeat
+      psPing: Begin
           cnt := aSocket.Get(buffer, length(Buffer));
-          For i := 0 To cnt - 1 Do Begin
-            If Buffer[i] = 13 Then Begin
-              writeln('');
-            End
-            Else Begin
-              If buffer[i] = 27 Then Begin
-                fRunning := False;
+          If cnt > 0 Then SomethingWasRead := true;
+          writeln('Got ping from : ' + aSocket.PeerAddress);
+          fRunning := false;
+        End;
+      psChat: Begin
+          Repeat
+            cnt := aSocket.Get(buffer, length(Buffer));
+            If cnt > 0 Then SomethingWasRead := true;
+            For i := 0 To cnt - 1 Do Begin
+              If Buffer[i] = 13 Then Begin
+                writeln('');
               End
               Else Begin
-                write(chr(buffer[i]));
+                If buffer[i] = 27 Then Begin
+                  fRunning := False;
+                End
+                Else Begin
+                  write(chr(buffer[i]));
+                End;
               End;
             End;
-          End;
-        Until cnt = 0;
-      End;
-  End;
+          Until cnt = 0;
+        End;
+    End;
+  Until Not SomethingWasRead;
 End;
 
 Procedure TNPush.OnUDPDisconnectEvent(aSocket: TLSocket);
