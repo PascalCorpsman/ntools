@@ -79,11 +79,6 @@ Uses ulogger, crt, FileUtil, LazUTF8, LazFileUtils, math, md5, uip;
 Const
   Welcome_Message = 'Hello';
 
-  Procedure Nop();
-  begin
-
-  end;
-
   { TNPush }
 
 Constructor TNPush.create(Port: integer);
@@ -520,7 +515,6 @@ Begin
                 If cnt <> 1 Then Begin
                   aSocket.Eventer.CallAction;
                   cnt := aSocket.Get(buffer, 1);
-                  nop();
                  // fRunning := false;
                   exit;
                 End;

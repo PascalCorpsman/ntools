@@ -287,9 +287,6 @@ Begin
                     fFileReceiveInfo.HeaderHeaderBytesPointer := 0;
                     fFileReceiveInfo.FileReceiveState := frsReceiveHeader;
                   End;
-                End
-                Else Begin
-//                  frunning := false;
                 End;
               End;
             frsReceiveHeader: Begin
