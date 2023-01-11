@@ -1,10 +1,33 @@
-(*
- * Inspired by: https://forum.lazarus.freepascal.org/index.php?topic=24506.0
- *
- * Unit to get all Adapternames and their assosiated IP-Addresses
- *
- * Tested unter Linux and Windows
- *)
+(******************************************************************************)
+(* uip.pas                                                         ??.??.???? *)
+(*                                                                            *)
+(* Version     : 0.01                                                         *)
+(*                                                                            *)
+(* Author      : Uwe Schächterle (Corpsman)                                   *)
+(*                                                                            *)
+(* Support     : www.Corpsman.de                                              *)
+(*                                                                            *)
+(* Description : Unit to get all Adapternames and their assosiated            *)
+(*               IP-Addresses                                                 *)
+(*                                                                            *)
+(* Inspired by : https://forum.lazarus.freepascal.org/index.php?topic=24506.0 *)
+(*                                                                            *)
+(* License     : See the file license.md, located under:                      *)
+(*  https://github.com/PascalCorpsman/Software_Licenses/blob/main/license.md  *)
+(*  for details about the license.                                            *)
+(*                                                                            *)
+(*               It is not allowed to change or remove this text from any     *)
+(*               source file of the project.                                  *)
+(*                                                                            *)
+(* Warranty    : There is no warranty, neither in correctness of the          *)
+(*               implementation, nor anything other that could happen         *)
+(*               or go wrong, use at your own risk.                           *)
+(*                                                                            *)
+(* Known Issues: none                                                         *)
+(*                                                                            *)
+(* History     : 0.01 - Initial version                                       *)
+(*                                                                            *)
+(******************************************************************************)
 
 Unit uip;
 

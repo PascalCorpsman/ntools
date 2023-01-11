@@ -1,3 +1,17 @@
+(******************************************************************************)
+(*                                                                            *)
+(* Author      : Uwe Schächterle (Corpsman)                                   *)
+(*                                                                            *)
+(* This file is part of ntools/npoll                                          *)
+(*                                                                            *)
+(*  See the file license.md, located under:                                   *)
+(*  https://github.com/PascalCorpsman/Software_Licenses/blob/main/license.md  *)
+(*  for details about the license.                                            *)
+(*                                                                            *)
+(*               It is not allowed to change or remove this text from any     *)
+(*               source file of the project.                                  *)
+(*                                                                            *)
+(******************************************************************************)
 Unit unpoll;
 
 {$MODE objfpc}{$H+}
@@ -291,7 +305,7 @@ Begin
               End;
             frsReceiveHeader: Begin
                 cnt := aSocket.Get(buffer, 28 - fFileReceiveInfo.HeaderHeaderBytesPointer); // Lesen des gesammten Headers
-                if fFileReceiveInfo.HeaderHeaderBytesPointer = 28 then SomethingWasReceived := true;
+                If fFileReceiveInfo.HeaderHeaderBytesPointer = 28 Then SomethingWasReceived := true;
                 If cnt > 0 Then SomethingWasReceived := true;
                 setlength(fFileReceiveInfo.HeaderHeaderBytes, cnt + fFileReceiveInfo.HeaderHeaderBytesPointer);
                 For i := 0 To cnt - 1 Do Begin

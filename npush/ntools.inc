@@ -1,18 +1,47 @@
-
+(******************************************************************************)
+(* npush                                                           ??.??.???? *)
+(*                                                                            *)
+(* Version     : 0.09                                                         *)
+(*                                                                            *)
+(* Author      : Uwe Schächterle (Corpsman)                                   *)
+(*                                                                            *)
+(* Support     : www.Corpsman.de                                              *)
+(*                                                                            *)
+(* Description : Easy filesharing withing local networks                      *)
+(*                                                                            *)
+(* License     : See the file license.md, located under:                      *)
+(*  https://github.com/PascalCorpsman/Software_Licenses/blob/main/license.md  *)
+(*  for details about the license.                                            *)
+(*                                                                            *)
+(*               It is not allowed to change or remove this text from any     *)
+(*               source file of the project.                                  *)
+(*                                                                            *)
+(* Warranty    : There is no warranty, neither in correctness of the          *)
+(*               implementation, nor anything other that could happen         *)
+(*               or go wrong, use at your own risk.                           *)
+(*                                                                            *)
+(* Known Issues: none                                                         *)
+(*                                                                            *)
+(* History     : 0.01 - Initial version                                       *)
+(*               0.02 - freischalten Option -p                                *)
+(*                      Bugfix Option -i                                      *)
+(*               0.03 - Bugfix NPush beim einlesen von verzeichnissen wurde   *)
+(*                      nur die 1. Datei kopiert (dafür aber so oft wie es    *)
+(*                      Dateien im Verzeichnis gab)                           *)
+(*                      -i Option für npush                                   *)
+(*               0.04 - Sendennun auch mit "zerlegten" headern                *)
+(*               0.05 - npush aktzeptiert nun auch, wenn die Paramstr( * ) mit*)
+(*                      einem crt terminiert sind                             *)
+(*               0.06 - die LCL hat sich geändert, daher waren Anpassungen    *)
+(*                      notwendig                                             *)
+(*               0.07 - npush sendet den UDP-Broadcast nun auf allen Adaptern *)
+(*               0.08 - OnReceive Auswertung von npoll musste angepasst       *)
+(*                      werden.                                               *)
+(*               0.09 - ver 0.08 war immer noch nicht "korrekt", nun wieder   *)
+(*                      getestet auf windows / Linux                          *)
+(*                                                                            *)
+(******************************************************************************)
 Const
-  (*
-   * Historie : 0.01 = Initialversion
-   *            0.02 = freischalten Option -p
-   *                   Bugfix Option -i
-   *            0.03 = Bugfix NPush beim einlesen von verzeichnissen wurde nur die 1. Datei kopiert (dafür aber so oft wie es Dateien im Verzeichnis gab)
-   *                   -i Option für npush
-   *            0.04 = Sendennun auch mit "zerlegten" headern
-   *            0.05 = npush aktzeptiert nun auch, wenn die Paramstr( * ) mit einem crt terminiert sind
-   *            0.06 = die LCL hat sich geändert, daher waren Anpassungen notwendig
-   *            0.07 = npush sendet den UDP-Broadcast nun auf allen Adaptern
-   *            0.08 = OnReceive Auswertung von npoll musste angepasst werden.
-   *            0.09 = ver 0.08 war immer noch nicht "korrekt", nun wieder getestet auf windows / Linux
-   *)
   Version = '0.09';
   //  BufferSize = 32768; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
   BufferSize = 16384; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 12.000.000

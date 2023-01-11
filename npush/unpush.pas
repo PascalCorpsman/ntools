@@ -1,3 +1,17 @@
+(******************************************************************************)
+(*                                                                            *)
+(* Author      : Uwe Schächterle (Corpsman)                                   *)
+(*                                                                            *)
+(* This file is part of ntools/npush                                          *)
+(*                                                                            *)
+(*  See the file license.md, located under:                                   *)
+(*  https://github.com/PascalCorpsman/Software_Licenses/blob/main/license.md  *)
+(*  for details about the license.                                            *)
+(*                                                                            *)
+(*               It is not allowed to change or remove this text from any     *)
+(*               source file of the project.                                  *)
+(*                                                                            *)
+(******************************************************************************)
 Unit unpush;
 
 {$MODE objfpc}{$H+}
@@ -84,8 +98,8 @@ Const
 Constructor TNPush.create(Port: integer);
 Begin
   Inherited create;
-  Log('npush ver. 0.01', llTrace);
-  Log('npush ver. 0.01', llInfo);
+  Log('npush ver. ' + Version, llTrace);
+  Log('npush ver. ' + Version, llInfo);
   UDPBroadCastIP := LADDR_BR;
   fPort := Port;
   CheckMD5 := false;
@@ -515,7 +529,7 @@ Begin
                 If cnt <> 1 Then Begin
                   aSocket.Eventer.CallAction;
                   cnt := aSocket.Get(buffer, 1);
-                 // fRunning := false;
+                  // fRunning := false;
                   exit;
                 End;
                 Case buffer[0] Of
