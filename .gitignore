@@ -1,0 +1,5 @@
+**/backup/
+**/lib/
+use/*/
+src/*/*.lps
+src/*/*.res
