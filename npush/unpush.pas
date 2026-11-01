@@ -126,7 +126,11 @@ Type
 
 Implementation
 
-Uses ulogger, crt, FileUtil, LazUTF8, LazFileUtils, math, md5, uip;
+Uses ulogger, crt, FileUtil, LazUTF8, LazFileUtils, math, md5, uip
+{$IFDEF Windows}
+  , mmsystem
+{$ENDIF}
+  ;
 
 Const
   Welcome_Message = 'Hello';
@@ -351,6 +355,11 @@ Begin
     SetExitStatus(ecError);
   End;
   fWaitStart := GetTickCount64;
+{$IFDEF Windows}
+  // Sonst dauert sleep(1) eine ganze Zeitscheibe (~16ms) und bremst die Übertragung auf ~12 MB/s
+  // Windows setzt das beim Beenden des Prozesses selbst zurück, auch bei einer Exception
+  timeBeginPeriod(1);
+{$ENDIF}
   While frunning Do Begin
     ftcp.CallAction;
     fudp.CallAction;
@@ -370,6 +379,9 @@ Begin
     End;
     sleep(1); // Prevent 100% CPU-Load
   End;
+{$IFDEF Windows}
+  timeEndPeriod(1);
+{$ENDIF}
 End;
 
 Procedure TNPush.HandleWaitForConnection;

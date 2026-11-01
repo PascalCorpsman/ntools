@@ -113,7 +113,11 @@ Type
 
 Implementation
 
-Uses ulogger, crt, math, lazutf8, LazFileUtils;
+Uses ulogger, crt, math, lazutf8, LazFileUtils
+{$IFDEF Windows}
+  , mmsystem
+{$ENDIF}
+  ;
 
 Const
   MaxFilenameLen = 32767; // Mehr kann auch Windows mit "\\?\" Prefix nicht
@@ -256,6 +260,11 @@ Begin
   //End;
   logshow('waiting for connections...', llInfo);
   fWaitStart := GetTickCount64;
+{$IFDEF Windows}
+  // Sonst dauert sleep(1) eine ganze Zeitscheibe (~16ms) und bremst die Übertragung auf ~12 MB/s
+  // Windows setzt das beim Beenden des Prozesses selbst zurück, auch bei einer Exception
+  timeBeginPeriod(1);
+{$ENDIF}
   While frunning Do Begin
     fudp.CallAction;
     ftcp.CallAction;
@@ -280,6 +289,9 @@ Begin
     End;
     sleep(1);
   End;
+{$IFDEF Windows}
+  timeEndPeriod(1);
+{$ENDIF}
 End;
 
 Procedure TNPoll.OnUDPReceiveEvent(aSocket: TLSocket);

@@ -42,6 +42,7 @@
 (*               0.10 - Fortschrittsanzeige, Zusammenfassung, Exit-Codes      *)
 (*                      Optionen -q, -t (beide), -m (npush), -n (npoll)       *)
 (*                      -md5 prüft die Datei auch nach der Übertragung        *)
+(*                      Windows: Timer auf 1ms, ca. 8x schnellere Übertragung *)
 (*                                                                            *)
 (******************************************************************************)
 Const
