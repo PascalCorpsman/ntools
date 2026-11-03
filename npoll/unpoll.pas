@@ -65,7 +65,28 @@ Type
     fState: TPollState;
     fFileReceiveInfo: TFileReceiveInfo;
     fNeedRestart: Boolean;
+    fExitStatus: integer;
+    fWaitStart: QWord; // Seit wann auf ein npush gewartet wird (für Timeout)
+    fSessionCount: integer; // Anzahl abgeschlossener Übertragungen (bei -s mehrere)
+    fSessionDone: Boolean; // npush hat das reguläre Ende (27) gesendet
+    // Statistik der aktuellen Übertragung
+    fStatFiles: integer;
+    fStatSkipped: integer;
+    fStatErrors: integer;
+    fStatBytes: int64;
+    fStatStart: QWord;
+    // Fortschrittsanzeige der aktuellen Datei
+    fFileStart: QWord;
+    fFileStartPosition: int64;
+    fLastProgress: QWord;
+    fProgressVisible: Boolean;
+    fProgressLen: integer;
     Procedure Restart; // Tut so als wäre die App neu gestartet worden
+    Procedure SetExitStatus(Value: integer);
+    Procedure ShowProgress(Final: Boolean);
+    Procedure ShowSummary(Success: Boolean);
+    Procedure FileStarted;
+    Procedure FileFinished;
     Procedure OnUDPErrorEvent(Const msg: String; aSocket: TLSocket);
     Procedure OnUDPReceiveEvent(aSocket: TLSocket);
 
@@ -81,14 +102,22 @@ Type
   public
     ForceIP: String;
     StayOpen: Boolean;
+    Quiet: Boolean; // Keine automatische Fortschrittsanzeige
+    NoOverwrite: Boolean; // Vorhandene Dateien nicht überschreiben
+    Timeout: integer; // Sekunden die auf ein npush gewartet wird, 0 = unbegrenzt
     Constructor create(Port: integer);
     Destructor destroy; override;
     Procedure Execute;
+    Property ExitStatus: integer read fExitStatus;
   End;
 
 Implementation
 
-Uses ulogger, crt, math, lazutf8, LazFileUtils;
+Uses ulogger, crt, math, lazutf8, LazFileUtils
+{$IFDEF Windows}
+  , mmsystem
+{$ENDIF}
+  ;
 
 Const
   MaxFilenameLen = 32767; // Mehr kann auch Windows mit "\\?\" Prefix nicht
@@ -100,6 +129,22 @@ Begin
 {$ELSE}
   result := StringReplace(value, '/', '\', [rfReplaceAll]);
 {$ENDIF}
+End;
+
+Function FormatSize(Value: int64): String;
+Begin
+  If Value < 1024 Then Begin
+    result := inttostr(Value) + ' B';
+  End
+  Else If Value < 1024 * 1024 Then Begin
+    result := format('%0.1f KB', [Value / 1024]);
+  End
+  Else If Value < 1024 * 1024 * 1024 Then Begin
+    result := format('%0.1f MB', [Value / (1024 * 1024)]);
+  End
+  Else Begin
+    result := format('%0.2f GB', [Value / (1024 * 1024 * 1024)]);
+  End;
 End;
 
 Function RecursiveCreateDirUTF8(Directory: String): Boolean;
@@ -131,6 +176,14 @@ Begin
   Log('npoll ver. ' + Version, llTrace);
   Log('npoll ver. ' + Version, llInfo);
   StayOpen := false;
+  Quiet := false;
+  NoOverwrite := false;
+  Timeout := 0;
+  fExitStatus := ecOK;
+  fSessionCount := 0;
+  fSessionDone := false;
+  fProgressVisible := false;
+  fProgressLen := 0;
   fNeedRestart := false;
   fPort := Port;
 
@@ -167,6 +220,9 @@ Begin
   While ftcp.Connected Do Begin
     ftcp.CallAction;
   End;
+  If assigned(fFileReceiveInfo.AktualFile) Then fFileReceiveInfo.AktualFile.free;
+  fFileReceiveInfo.AktualFile := Nil;
+  fWaitStart := GetTickCount64;
   { // Free TCP Component during restart
   ftcp.free;
   ftcp := Nil;
@@ -186,6 +242,7 @@ Begin
   //  Try
   If Not fudp.Listen(fport) Then Begin
     logshow('Could not listen on udp', llWarning);
+    SetExitStatus(ecError);
     fRunning := false;
   End
   Else Begin
@@ -202,6 +259,12 @@ Begin
   //  End;
   //End;
   logshow('waiting for connections...', llInfo);
+  fWaitStart := GetTickCount64;
+{$IFDEF Windows}
+  // Sonst dauert sleep(1) eine ganze Zeitscheibe (~16ms) und bremst die Übertragung auf ~12 MB/s
+  // Windows setzt das beim Beenden des Prozesses selbst zurück, auch bei einer Exception
+  timeBeginPeriod(1);
+{$ENDIF}
   While frunning Do Begin
     fudp.CallAction;
     ftcp.CallAction;
@@ -226,6 +289,9 @@ Begin
     End;
     sleep(1);
   End;
+{$IFDEF Windows}
+  timeEndPeriod(1);
+{$ENDIF}
 End;
 
 Procedure TNPoll.OnUDPReceiveEvent(aSocket: TLSocket);
@@ -265,12 +331,12 @@ Begin
                       SomethingWasReceived := true;
                       fFileReceiveInfo.AktualFile.Write(buffer, cnt);
                       fFileReceiveInfo.Position := fFileReceiveInfo.Position + cnt;
+                      fStatBytes := fStatBytes + cnt;
                     End;
                   End;
                   If fFileReceiveInfo.Position >= fFileReceiveInfo.FileSize Then Begin
                     cnt := 0;
-                    fFileReceiveInfo.AktualFile.free;
-                    fFileReceiveInfo.AktualFile := Nil;
+                    FileFinished;
                     fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
                     SomethingWasReceived := true; // TODO: Macht das sinn ?
                   End;
@@ -283,6 +349,9 @@ Begin
                   If Buffer[0] = 27 Then Begin
                     // Reguläres Ende
                     log('File transfer finished.', llTrace);
+                    fSessionDone := true;
+                    inc(fSessionCount);
+                    ShowSummary(fStatErrors = 0);
                     If StayOpen Then Begin
                       fNeedRestart := true;
                     End
@@ -329,6 +398,7 @@ Begin
                   If (strLen <= 0) Or (strLen > MaxFilenameLen) Then Begin
                     // Ungültige Länge, die Gegenstelle ist kein npush oder spricht ein anderes Protokoll
                     logshow('Error invalid filename length : ' + inttostr(strLen), llFatal);
+                    SetExitStatus(ecError);
                     ftcp.SendMessage('A');
                     frunning := false;
                     exit;
@@ -374,12 +444,20 @@ Begin
               ord('2'): Begin
                   fState := psReceiveFiles;
                   log('Receive files', llTrace);
+                  logshow('Receive files from : ' + aSocket.PeerAddress, llInfo);
                   If assigned(fFileReceiveInfo.AktualFile) Then fFileReceiveInfo.AktualFile.free;
                   fFileReceiveInfo.AktualFile := Nil;
                   fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
+                  fSessionDone := false;
+                  fStatFiles := 0;
+                  fStatSkipped := 0;
+                  fStatErrors := 0;
+                  fStatBytes := 0;
+                  fStatStart := GetTickCount64;
                 End
             Else Begin
                 log('Unknown command : "' + chr(Buffer[0]) + '"', llWarning);
+                SetExitStatus(ecError);
                 frunning := false;
               End;
             End;
@@ -418,6 +496,19 @@ End;
 Procedure TNPoll.OnTCPDisconnect(aSocket: TLSocket);
 Begin
   // Todo : Evtl muss hier erkannt werden, welcher Socket sich Trennt, nicht das eine 2. Npush Verbindung was durcheinander bringt..
+  If (fState = psReceiveFiles) And Not fSessionDone Then Begin
+    // npush ist mitten in der Übertragung weg, die aktuelle Datei ist unvollständig
+    If assigned(fFileReceiveInfo.AktualFile) Then Begin
+      fFileReceiveInfo.AktualFile.free;
+      fFileReceiveInfo.AktualFile := Nil;
+      If fProgressVisible Then writeln('');
+      fProgressVisible := false;
+      logshow('Incomplete file (continue with npush -a) : ' + fFileReceiveInfo.Filename, llWarning);
+    End;
+    logshow('Connection to npush lost.', llWarning);
+    fSessionDone := true;
+    ShowSummary(false);
+  End;
   If StayOpen Then Begin
     fNeedRestart := true;
   End
@@ -428,8 +519,18 @@ End;
 
 Procedure TNPoll.HandleWaitForConnection;
 Begin
+  If (Timeout > 0) And (GetTickCount64 - fWaitStart > QWord(Timeout) * 1000) Then Begin
+    If fSessionCount = 0 Then Begin
+      logshow('No npush found within ' + inttostr(Timeout) + ' s.', llWarning);
+      SetExitStatus(ecNoPartner);
+    End;
+    frunning := false;
+    exit;
+  End;
   If KeyPressed Then Begin
     If ReadKey = #27 Then Begin
+      // Bei -s ist ESC nach einer Übertragung das reguläre Ende
+      If fSessionCount = 0 Then SetExitStatus(ecUserAbort);
       frunning := false;
     End;
   End;
@@ -463,14 +564,111 @@ Begin
   If KeyPressed Then Begin
     c := ReadKey;
     If c = #27 Then Begin
+      If fProgressVisible Then writeln('');
+      fProgressVisible := false;
+      SetExitStatus(ecUserAbort);
       frunning := false;
     End;
-    If c = 'i' Then Begin
+    If c = 'i' Then Begin // Fortschritt auch bei -q auf Anforderung
       If fFileReceiveInfo.FileReceiveState = frsReceiveFile Then Begin
-        writeln(format('%d kB from %d kB = %0.1f%%', [round(fFileReceiveInfo.Position / 1024), round(fFileReceiveInfo.FileSize / 1024), (fFileReceiveInfo.Position * 100) / fFileReceiveInfo.FileSize]));
+        ShowProgress(false);
       End;
     End;
   End;
+  If frunning And (Not Quiet) And (fFileReceiveInfo.FileReceiveState = frsReceiveFile) And
+    (GetTickCount64 - fLastProgress >= 500) Then Begin
+    ShowProgress(false);
+  End;
+End;
+
+Procedure TNPoll.SetExitStatus(Value: integer);
+Begin
+  // Der erste Grund gewinnt, ein späteres ESC soll einen Fehler nicht verdecken
+  If fExitStatus = ecOK Then fExitStatus := Value;
+End;
+
+Procedure TNPoll.ShowProgress(Final: Boolean);
+Var
+  s, eta: String;
+  secs, rate: Double;
+  pct: Double;
+Begin
+  fLastProgress := GetTickCount64;
+  secs := (fLastProgress - fFileStart) / 1000;
+  rate := 0;
+  If secs > 0 Then rate := (fFileReceiveInfo.Position - fFileStartPosition) / secs;
+  pct := 100;
+  If fFileReceiveInfo.FileSize > 0 Then pct := fFileReceiveInfo.Position * 100 / fFileReceiveInfo.FileSize;
+  If Final Then Begin
+    eta := format('%0.1f s', [secs]);
+  End
+  Else If rate > 0 Then Begin
+    eta := format('%d s left', [round((fFileReceiveInfo.FileSize - fFileReceiveInfo.Position) / rate)]);
+  End
+  Else Begin
+    eta := '';
+  End;
+  s := format('  %5.1f%%  %s / %s  %s/s  %s', [pct, FormatSize(fFileReceiveInfo.Position), FormatSize(fFileReceiveInfo.FileSize), FormatSize(round(rate)), eta]);
+  // Mit #13 wird die Zeile überschrieben, Leerzeichen löschen die Reste einer längeren Zeile
+  write(#13 + s + StringOfChar(' ', max(0, fProgressLen - length(s))));
+  fProgressLen := length(s);
+  fProgressVisible := true;
+  If Final Then Begin
+    writeln('');
+    fProgressVisible := false;
+    fProgressLen := 0;
+  End;
+End;
+
+Procedure TNPoll.ShowSummary(Success: Boolean);
+Var
+  secs: Double;
+  s: String;
+Begin
+  secs := (GetTickCount64 - fStatStart) / 1000;
+  s := format('%d file(s) received, %d skipped, %d failed, %s in %0.1f s', [fStatFiles, fStatSkipped, fStatErrors, FormatSize(fStatBytes), secs]);
+  If secs > 0 Then s := s + ' (' + FormatSize(round(fStatBytes / secs)) + '/s)';
+  If Success Then Begin
+    logshow('Done: ' + s, llInfo);
+  End
+  Else Begin
+    logshow('Aborted: ' + s, llWarning);
+    SetExitStatus(ecError);
+  End;
+End;
+
+Procedure TNPoll.FileStarted;
+Begin
+  fFileStart := GetTickCount64;
+  fLastProgress := fFileStart;
+  fFileStartPosition := fFileReceiveInfo.Position;
+End;
+
+(*
+ * Die aktuelle Datei ist vollständig empfangen, bei -md5 wird sie gegen die
+ * Prüfsumme von npush geprüft. Eine falsche Datei wird gelöscht, damit sie
+ * beim nächsten Mal komplett neu übertragen wird (auch mit -a).
+ *)
+
+Procedure TNPoll.FileFinished;
+Var
+  md5: TMD5Digest;
+Begin
+  fFileReceiveInfo.AktualFile.free;
+  fFileReceiveInfo.AktualFile := Nil;
+  If fProgressVisible Then ShowProgress(true);
+  If fFileReceiveInfo.CheckMD5 Then Begin
+    md5 := MD5File(fFileReceiveInfo.Filename);
+    If Not MD5Match(md5, fFileReceiveInfo.md5) Then Begin
+      logshow('MD5 mismatch, file deleted : ' + fFileReceiveInfo.Filename, llWarning);
+      DeleteFileUTF8(fFileReceiveInfo.Filename);
+      inc(fStatErrors);
+      SetExitStatus(ecError);
+      exit;
+    End;
+    log('MD5 verified : ' + fFileReceiveInfo.Filename, llTrace);
+  End;
+  inc(fStatFiles);
 End;
 
 Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
@@ -484,6 +682,7 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
     If Not RecursiveCreateDirUTF8(IncludeTrailingPathDelimiter(ExtractFilePath(Filename))) Then Begin
       // Der Pfad konnte nicht erstellt werden, wie sollen wir dann die Datei rein schreiben
       logshow('Error could not create Directorystructure for : ' + Filename, llFatal);
+      SetExitStatus(ecError);
       ftcp.SendMessage('A');
       frunning := false;
       exit;
@@ -494,6 +693,7 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
       fFileReceiveInfo.AktualFile.free;
       fFileReceiveInfo.AktualFile := Nil;
       log('File already completed', llInfo);
+      inc(fStatFiles);
       fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
       ftcp.SendMessage('N'); // Wir haben die Datei schon, die nächste bitte
       exit;
@@ -501,11 +701,14 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
     fFileReceiveInfo.FileReceiveState := frsReceiveFile;
     If fFileReceiveInfo.AppendData And FileExistsUTF8(Filename) Then Begin
       fFileReceiveInfo.AktualFile := TFileStream.Create(UTF8ToSys(Filename), fmOpenWrite);
-      If fFileReceiveInfo.AktualFile.Size = fFileReceiveInfo.FileSize Then Begin
+      // Bei -md5 sind wir nur hier, wenn die MD5 nicht passt, eine gleich große Datei ist dann
+      // nicht vollständig sondern anders und muss komplett neu geholt werden
+      If (fFileReceiveInfo.AktualFile.Size = fFileReceiveInfo.FileSize) And (Not fFileReceiveInfo.CheckMD5) Then Begin
         // Die Datei gibts schon Vollständig
         fFileReceiveInfo.AktualFile.free;
         fFileReceiveInfo.AktualFile := Nil;
         log('File already completed', llInfo);
+        inc(fStatSkipped);
         fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
         ftcp.SendMessage('N'); // Wir haben die Datei schon, die nächste bitte
       End
@@ -524,6 +727,7 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
           i64 := 0;
         End;
         fFileReceiveInfo.Filename := Filename;
+        FileStarted;
         buffer[0] := 8; // Steuerbefehl für Continue Large File
         For i := 0 To 7 Do Begin
           buffer[8 - i] := i64 And $FF;
@@ -539,6 +743,7 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
       fFileReceiveInfo.AktualFile := TFileStream.Create(UTF8ToSys(Filename), fmcreate Or fmOpenWrite);
       fFileReceiveInfo.Position := 0;
       fFileReceiveInfo.Filename := Filename;
+      FileStarted;
       ftcp.SendMessage('Y');
     End;
   End;
@@ -553,8 +758,16 @@ Begin
   If (pos(Base, s) <> 1) Or (length(s) <= length(Base)) Then Begin
     // Der Dateiname zeigt via ".." aus dem aktuellen Verzeichnis heraus, das darf nicht sein
     logshow('Error filename points outside of the current directory : ' + fFileReceiveInfo.Filename, llFatal);
+    SetExitStatus(ecError);
     ftcp.SendMessage('A');
     frunning := false;
+    exit;
+  End;
+  If NoOverwrite And FileExistsUTF8(s) Then Begin
+    logshow('File exists, skipped (-n).', llInfo);
+    inc(fStatSkipped);
+    fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
+    ftcp.SendMessage('N'); // Nicht überschreiben, die nächste bitte
     exit;
   End;
   If FileExistsUTF8(s) And (fFileReceiveInfo.CheckMD5) Then Begin
@@ -562,6 +775,7 @@ Begin
     md5 := MD5File(s);
     If MD5Match(md5, fFileReceiveInfo.md5) Then Begin
       log('MD5 OK, no need to transfer.', llTrace);
+      inc(fStatSkipped);
       fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
       ftcp.SendMessage('N'); // Wir haben die Datei schon, die nächste bitte
     End
@@ -599,6 +813,7 @@ Begin
   Else Begin
     logshow('UDP: ' + msg, llWarning);
   End;
+  SetExitStatus(ecError);
   fRunning := false;
 End;
 
@@ -609,6 +824,10 @@ Begin
   End
   Else Begin
     logshow('TCP: ' + msg, llWarning);
+  End;
+  // Nach dem regulären Ende (27, Ping) trennt npush hart, das ist kein Fehler mehr
+  If fRunning And (Not fNeedRestart) And Not ((fState = psReceiveFiles) And fSessionDone) Then Begin
+    SetExitStatus(ecError);
   End;
   fRunning := false;
 End;

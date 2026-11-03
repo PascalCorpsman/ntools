@@ -32,6 +32,12 @@ Type
     psTransferFiles // Arbeitet die Liste der Erstellten Dateien ab und dann Beenden
     );
 
+  TPushMode = (
+    pmPing, // Keine Dateien angegeben, nur ein Verbindungstest
+    pmChat, // Option -c
+    pmFiles // Dateien übertragen
+    );
+
   TFileSendState = (
     fssReadyForNextFile, // Alles Aktuelle ist Abgearbeitet, Starten mit der Nächste zu übertragenden Datei
     fssWaitForCRCResponse, // Anfrage bei Npoll ob die Datei gesendert werden soll
@@ -57,13 +63,32 @@ Type
   private
     fudp: TLUdp;
     ftcp: TLTcp;
+    fClient: TLSocket; // Die Verbindung zu dem npoll, das gerade bedient wird
+    fPending: TList; // npoll's die sich verbunden haben, während ein anderes bedient wurde
     fPort: Word;
     fState: TPushState;
+    fMode: TPushMode;
     fRunning: Boolean;
+    fExitStatus: integer;
     fHandleWaitForConnectionCounter: integer;
+    fWaitStart: QWord; // Seit wann auf ein npoll gewartet wird (für Timeout)
+    fSessionCount: integer; // Anzahl bisher bedienter npoll's
+    fAllSourceFiles: TStringList; // Werden einmalig beim Start ermittelt und für jede Sitzung kopiert
+    fAllDestFiles: TStringList;
     fSourceFilelist: TSTringlist;
     fDestFileList: TSTringlist;
     fFileSendInfo: TFileSendInfo;
+    // Statistik der aktuellen Sitzung
+    fStatFiles: integer;
+    fStatSkipped: integer;
+    fStatBytes: int64;
+    fStatStart: QWord;
+    // Fortschrittsanzeige der aktuellen Datei
+    fFileStart: QWord;
+    fFileStartPosition: int64;
+    fLastProgress: QWord;
+    fProgressVisible: Boolean;
+    fProgressLen: integer;
     Procedure OnUDPErrorEvent(Const msg: String; aSocket: TLSocket);
     Procedure OnUDPDisconnectEvent(aSocket: TLSocket);
     Procedure OnUDPReceiveEvent(aSocket: TLSocket);
@@ -74,7 +99,13 @@ Type
     Procedure OnTCPCanSendEvent(aSocket: TLSocket);
     Procedure OnTCPAcceptEvent(aSocket: TLSocket);
 
+    Function CollectFiles: Boolean;
+    Procedure StartSession(aSocket: TLSocket);
+    Procedure EndSession(Success: Boolean);
+    Procedure SetExitStatus(Value: integer);
+    Procedure ShowProgress(Final: Boolean);
     Procedure NextFile;
+    Procedure FileStarted;
 
     Procedure HandleWaitForConnection;
     Procedure HandleChat;
@@ -83,20 +114,44 @@ Type
   public
     AppendData: Boolean;
     CheckMD5: Boolean;
+    Quiet: Boolean; // Keine automatische Fortschrittsanzeige
+    MaxSessions: integer; // Anzahl npoll's die bedient werden, 0 = bis ESC
+    Timeout: integer; // Sekunden die auf ein npoll gewartet wird, 0 = unbegrenzt
     UDPBroadCastIP: String;
     Constructor create(Port: integer);
     Destructor destroy; override;
     Procedure Execute;
+    Property ExitStatus: integer read fExitStatus;
   End;
 
 Implementation
 
-Uses ulogger, crt, FileUtil, LazUTF8, LazFileUtils, math, md5, uip;
+Uses ulogger, crt, FileUtil, LazUTF8, LazFileUtils, math, md5, uip
+{$IFDEF Windows}
+  , mmsystem
+{$ENDIF}
+  ;
 
 Const
   Welcome_Message = 'Hello';
 
-  { TNPush }
+Function FormatSize(Value: int64): String;
+Begin
+  If Value < 1024 Then Begin
+    result := inttostr(Value) + ' B';
+  End
+  Else If Value < 1024 * 1024 Then Begin
+    result := format('%0.1f KB', [Value / 1024]);
+  End
+  Else If Value < 1024 * 1024 * 1024 Then Begin
+    result := format('%0.1f MB', [Value / (1024 * 1024)]);
+  End
+  Else Begin
+    result := format('%0.2f GB', [Value / (1024 * 1024 * 1024)]);
+  End;
+End;
+
+{ TNPush }
 
 Constructor TNPush.create(Port: integer);
 Begin
@@ -107,6 +162,10 @@ Begin
   fPort := Port;
   CheckMD5 := false;
   AppendData := false;
+  Quiet := false;
+  MaxSessions := 1;
+  Timeout := 0;
+  fExitStatus := ecOK;
   fudp := TLUdp.Create(Nil);
   fudp.OnDisconnect := @OnudpDisconnectEvent;
   fudp.OnError := @OnudpErrorEvent;
@@ -121,18 +180,26 @@ Begin
   ftcp.OnAccept := @OnTCPAcceptEvent;
 
   fState := psWaitForConnection;
+  fMode := pmPing;
+  fClient := Nil;
+  fPending := TList.Create;
   fHandleWaitForConnectionCounter := 0;
-  fSourceFilelist := Nil;
-  fDestFileList := Nil;
+  fSessionCount := 0;
+  fAllSourceFiles := TStringList.Create;
+  fAllDestFiles := TStringList.Create;
+  fSourceFilelist := TStringList.Create;
+  fDestFileList := TStringList.Create;
+  fProgressVisible := false;
+  fProgressLen := 0;
 End;
 
 Destructor TNPush.destroy;
 Begin
   Log('destroy', llTrace);
-  If assigned(fSourceFilelist) Then fSourceFilelist.free;
-  fSourceFilelist := Nil;
-  If assigned(fDestFileList) Then fDestFileList.free;
-  fDestFileList := Nil;
+  fSourceFilelist.free;
+  fDestFileList.free;
+  fAllSourceFiles.free;
+  fAllDestFiles.free;
   If Assigned(fFileSendInfo.AktualFile) Then fFileSendInfo.AktualFile.Free;
   fFileSendInfo.AktualFile := Nil;
   fudp.free;
@@ -143,10 +210,125 @@ Begin
     End;
   End;
   ftcp.free;
+  fPending.free;
+  Inherited destroy;
+End;
+
+Procedure TNPush.SetExitStatus(Value: integer);
+Begin
+  // Der erste Grund gewinnt, ein späteres ESC soll einen Fehler nicht verdecken
+  If fExitStatus = ecOK Then fExitStatus := Value;
+End;
+
+(*
+ * Wertet die Übergabeparameter aus und erstellt die Liste der zu sendenden Dateien.
+ * Wird einmalig beim Start aufgerufen, so werden Tippfehler sofort gemeldet und nicht
+ * erst wenn sich ein npoll verbunden hat.
+ *)
+
+Function TNPush.CollectFiles: Boolean;
+Var
+  Cwd: String;
+
+  Procedure AddFiles(Const sl: TStringList; CutLen: integer);
+  Var
+    j: integer;
+  Begin
+    For j := 0 To sl.Count - 1 Do Begin
+      fAllSourceFiles.Add(sl[j]);
+      fAllDestFiles.Add(copy(sl[j], CutLen + 1, length(sl[j])));
+    End;
+    sl.free;
+  End;
+
+Var
+  i: integer;
+  p, s: String;
+  FileArgs: integer;
+Begin
+  result := true;
+  Cwd := GetCurrentDirUTF8;
+  FileArgs := 0;
+  i := 0;
+  While i < ParamCount Do Begin
+    inc(i);
+    p := trim(ParamStrUTF8(i)); // trim, da die Parameter mit einem crt terminiert sein können
+    If (lowercase(p) = '-l') Or (lowercase(p) = '-p') Or (lowercase(p) = '-i') Or
+      (lowercase(p) = '-t') Or (lowercase(p) = '-m') Then Begin // Optionen mit Wert überspringen
+      inc(i);
+      Continue;
+    End;
+    If (lowercase(p) = '-md5') Or (lowercase(p) = '-a') Or (lowercase(p) = '-q') Then Continue;
+    If lowercase(p) = '-c' Then Begin
+      fMode := pmChat;
+      Continue;
+    End;
+    If p = '' Then Continue;
+    inc(FileArgs);
+    If (p = '*.*') Then Begin // Alle Lokalen Dateien
+      AddFiles(FindAllFiles(Cwd, '', false), length(Cwd));
+      Continue;
+    End;
+    If (p = '*') Then Begin // Alle Dateien und Unterordner
+      AddFiles(FindAllFiles(Cwd, '', true), length(Cwd));
+      Continue;
+    End;
+    If pos('*.', p) = 1 Then Begin // Alle Dateien der Art *.xyz [;*.abc]
+      AddFiles(FindAllFiles(Cwd, p, false), length(Cwd));
+      Continue;
+    End;
+    If DirectoryExistsUTF8(p) Then Begin
+      If (pos(Cwd, p) = 1) Then Begin
+        AddFiles(FindAllFiles(p, '', true), length(Cwd));
+      End
+      Else If DirectoryExistsUTF8(IncludeTrailingPathDelimiter(Cwd) + p) Then Begin
+        AddFiles(FindAllFiles(IncludeTrailingPathDelimiter(Cwd) + p, '', true), length(Cwd));
+      End
+      Else Begin
+        // Es wurde ein Verzeichnis Übergeben wir schneiden den Namen aus und übergeben alles drunter
+        s := ExcludeTrailingPathDelimiter(p);
+        s := IncludeTrailingPathDelimiter(ExtractFilePath(s));
+        AddFiles(FindAllFiles(p, '', true), length(s) - 1);
+      End;
+      Continue;
+    End;
+    If FileExistsUTF8(p) Then Begin
+      fAllSourceFiles.Add(p);
+      fAllDestFiles.Add(ExtractFileName(p));
+      Continue;
+    End;
+    If pos('-', p) = 1 Then Begin
+      LogShow('Unknown option: ' + p + ', see npush -h', llWarning);
+    End
+    Else Begin
+      LogShow('File or directory not found: ' + p, llWarning);
+    End;
+    result := false;
+  End;
+  If Not result Then exit;
+  If fMode = pmChat Then exit;
+  If FileArgs = 0 Then Begin
+    fMode := pmPing;
+  End
+  Else Begin
+    If fAllSourceFiles.Count = 0 Then Begin
+      LogShow('No files found to send.', llWarning);
+      result := false;
+      exit;
+    End;
+    fMode := pmFiles;
+  End;
 End;
 
 Procedure TNPush.Execute;
 Begin
+  If Not CollectFiles Then Begin
+    SetExitStatus(ecError);
+    exit;
+  End;
+  If fMode = pmFiles Then Begin
+    Log(format('%d file(s) to send', [fAllSourceFiles.Count]), llInfo);
+  End;
   // 1.1 Alle Server Starten
   logger.Log('Creating Connections.', llTrace);
   frunning := true;
@@ -168,7 +350,16 @@ Begin
   If frunning Then Begin
     LogShow('scanning for connections...', llinfo);
     fudp.SendMessage(Welcome_Message, LADDR_LO); // Wir senden zu allererst ein Packet an uns selbst, sollte Npoll zuvällig auf der Eigenen IP laufen
+  End
+  Else Begin
+    SetExitStatus(ecError);
   End;
+  fWaitStart := GetTickCount64;
+{$IFDEF Windows}
+  // Sonst dauert sleep(1) eine ganze Zeitscheibe (~16ms) und bremst die Übertragung auf ~12 MB/s
+  // Windows setzt das beim Beenden des Prozesses selbst zurück, auch bei einer Exception
+  timeBeginPeriod(1);
+{$ENDIF}
   While frunning Do Begin
     ftcp.CallAction;
     fudp.CallAction;
@@ -188,6 +379,9 @@ Begin
     End;
     sleep(1); // Prevent 100% CPU-Load
   End;
+{$IFDEF Windows}
+  timeEndPeriod(1);
+{$ENDIF}
 End;
 
 Procedure TNPush.HandleWaitForConnection;
@@ -196,6 +390,14 @@ Var
   i: Integer;
   bip: String;
 Begin
+  If (Timeout > 0) And (GetTickCount64 - fWaitStart > QWord(Timeout) * 1000) Then Begin
+    If fSessionCount = 0 Then Begin
+      LogShow('No npoll found within ' + inttostr(Timeout) + ' s.', llWarning);
+      SetExitStatus(ecNoPartner);
+    End;
+    fRunning := false;
+    exit;
+  End;
   inc(fHandleWaitForConnectionCounter);
   If fHandleWaitForConnectionCounter Mod 250 = 0 Then Begin
     fHandleWaitForConnectionCounter := 0;
@@ -222,6 +424,8 @@ Begin
   End;
   If KeyPressed Then Begin // Abbruch durch Benutzer
     If ReadKey = #27 Then Begin
+      // Wurde schon mindestens ein npoll bedient, ist ESC das reguläre Ende (-m 0)
+      If fSessionCount = 0 Then SetExitStatus(ecUserAbort);
       fRunning := false;
     End;
   End;
@@ -244,7 +448,7 @@ Begin
         write(k);
       End;
     End;
-    ftcp.SendMessage(k);
+    If assigned(fClient) Then fClient.SendMessage(k);
   End;
 End;
 
@@ -252,6 +456,7 @@ Procedure TNPush.HandlePing;
 Begin
   If KeyPressed Then Begin // Abbruch durch Benutzer
     If ReadKey = #27 Then Begin
+      SetExitStatus(ecUserAbort);
       fRunning := false;
     End;
   End;
@@ -264,21 +469,27 @@ Begin
   If KeyPressed Then Begin // Abbruch durch Benutzer
     c := ReadKey;
     If c = #27 Then Begin
+      If fProgressVisible Then writeln('');
+      SetExitStatus(ecUserAbort);
       fRunning := false;
     End;
-    If c = 'i' Then Begin
+    If c = 'i' Then Begin // Fortschritt auch bei -q auf Anforderung
       If fFileSendInfo.FileSendState = fssFileTransfering Then Begin
-        writeln(format('%d kB from %d kB = %0.1f%%', [round(fFileSendInfo.Position / 1024), round(fFileSendInfo.FileSize / 1024), (fFileSendInfo.Position * 100) / fFileSendInfo.FileSize]));
+        ShowProgress(false);
       End;
     End;
   End;
   If fRunning Then Begin
+    If (Not Quiet) And (fFileSendInfo.FileSendState = fssFileTransfering) And
+      (GetTickCount64 - fLastProgress >= 500) Then Begin
+      ShowProgress(false);
+    End;
     Case fFileSendInfo.FileSendState Of
       fssReadyForNextFile: Begin
           If fSourceFilelist.Count = 0 Then Begin
             //Fertig, kontrolliert runter fahren
-            ftcp.SendMessage(#27);
-            fRunning := false;
+            fClient.SendMessage(#27);
+            EndSession(true);
           End
           Else Begin
             NextFile;
@@ -288,157 +499,132 @@ Begin
   End;
 End;
 
-Procedure TNPush.OnTCPAcceptEvent(aSocket: TLSocket);
+Procedure TNPush.ShowProgress(Final: Boolean);
 Var
-  j, i: Integer;
-  sl: Tstringlist;
-  tmp, s: String;
+  s, eta: String;
+  secs, rate: Double;
+  pct: Double;
 Begin
-  If fState = psWaitForConnection Then Begin
-    Log('Got tcp connection from : ' + aSocket.PeerAddress, llTrace);
-    // Auswerten der Übergabeparameter und entscheiden welcher der 3 Usecases wir haben
-    i := 0;
-    fSourceFilelist := TStringList.Create;
-    fDestFileList := TStringList.Create;
-    Repeat
-      inc(i);
-      If lowercase(ParamStrUTF8(i)) = '-l' Then Begin // Überspringen der Set Loglevel Parameter
-        inc(i, 2);
-      End;
-      If lowercase(ParamStrUTF8(i)) = '-c' Then Begin // Öffne den Chat Modus
+  fLastProgress := GetTickCount64;
+  secs := (fLastProgress - fFileStart) / 1000;
+  rate := 0;
+  If secs > 0 Then rate := (fFileSendInfo.Position - fFileStartPosition) / secs;
+  pct := 100;
+  If fFileSendInfo.FileSize > 0 Then pct := fFileSendInfo.Position * 100 / fFileSendInfo.FileSize;
+  If Final Then Begin
+    eta := format('%0.1f s', [secs]);
+  End
+  Else If rate > 0 Then Begin
+    eta := format('%d s left', [round((fFileSendInfo.FileSize - fFileSendInfo.Position) / rate)]);
+  End
+  Else Begin
+    eta := '';
+  End;
+  s := format('  %5.1f%%  %s / %s  %s/s  %s', [pct, FormatSize(fFileSendInfo.Position), FormatSize(fFileSendInfo.FileSize), FormatSize(round(rate)), eta]);
+  // Mit #13 wird die Zeile überschrieben, Leerzeichen löschen die Reste einer längeren Zeile
+  write(#13 + s + StringOfChar(' ', max(0, fProgressLen - length(s))));
+  fProgressLen := length(s);
+  fProgressVisible := true;
+  If Final Then Begin
+    writeln('');
+    fProgressVisible := false;
+    fProgressLen := 0;
+  End;
+End;
+
+Procedure TNPush.FileStarted;
+Begin
+  fFileStart := GetTickCount64;
+  fLastProgress := fFileStart;
+  fFileStartPosition := fFileSendInfo.Position;
+  fFileSendInfo.FileSendState := fssFileTransfering;
+End;
+
+Procedure TNPush.StartSession(aSocket: TLSocket);
+Begin
+  fClient := aSocket;
+  Case fMode Of
+    pmChat: Begin
         fState := psChat;
         Logshow('Open chat mode, press ESC to exit.', llInfo);
         aSocket.SendMessage('1'); // Steuercode 1 => Chat Modus
-        exit;
       End;
-      tmp := ParamStrUTF8(i); // Debug
-      // Versuch ein Verzeichnis zu versenden
-      If DirectoryExistsUTF8(trim(ParamStrUTF8(i))) Then Begin
-        If (pos(GetCurrentDirUTF8, trim(ParamStrUTF8(i))) = 1) Then Begin
-          sl := FindAllFiles(trim(ParamStrUTF8(i)), '', true);
-          For j := 0 To sl.Count - 1 Do Begin
-            fSourceFilelist.add(sl[j]);
-            fDestFileList.Add(copy(sl[j], length(trim(GetCurrentDirUTF8)) + 1, length(sl[j])));
-          End;
-          sl.free;
-        End
-        Else Begin
-          If DirectoryExistsUTF8(IncludeTrailingPathDelimiter(GetCurrentDirUTF8) + trim(ParamStrUTF8(i))) Then Begin
-            sl := FindAllFiles(IncludeTrailingPathDelimiter(GetCurrentDirUTF8) + trim(ParamStrUTF8(i)), '', true);
-            For j := 0 To sl.Count - 1 Do Begin
-              fSourceFilelist.add(sl[j]);
-              fDestFileList.Add(copy(sl[j], length(GetCurrentDirUTF8) + 1, length(sl[j])));
-            End;
-            sl.free;
-          End
-          Else Begin
-            // Es wurde ein Verzeichnis Übergeben wir schneiden den Namen aus und übergeben alles drunter
-            s := ExcludeTrailingPathDelimiter(trim(ParamStrUTF8(i)));
-            s := IncludeTrailingPathDelimiter(ExtractFilePath(s));
-            sl := FindAllFiles(trim(ParamStrUTF8(i)), '', true);
-            For j := 0 To sl.count - 1 Do Begin
-              fSourceFilelist.Add(sl[j]);
-              fDestFileList.add(copy(sl[j], length(s), length(sl[j])));
-            End;
-            sl.free;
-          End;
-        End;
-        Continue;
+    pmPing: Begin
+        Log('Sent a ping', llInfo);
+        fstate := psPing;
+        aSocket.SendMessage('0'); // Steuercode 0 => Ping, dann Beenden
       End;
+    pmFiles: Begin
+        LogShow('Send files to : ' + aSocket.PeerAddress, llInfo);
+        fSourceFilelist.Assign(fAllSourceFiles);
+        fDestFileList.Assign(fAllDestFiles);
+        fStatFiles := 0;
+        fStatSkipped := 0;
+        fStatBytes := 0;
+        fStatStart := GetTickCount64;
+        fFileSendInfo.FileSendState := fssReadyForNextFile;
+        fState := psTransferFiles;
+        aSocket.SendMessage('2'); // Steuercode 2 => Sende eine Beliebige Anzahl an Dateien
+      End;
+  End;
+End;
 
-      If FileExistsUTF8(trim(ParamStrUTF8(i))) Then Begin // Geöffnet im File Transfer modus eine oder mehrere Dateien
-        If DirectoryExistsUTF8(trim(ParamStrUTF8(i))) Then Begin // -- TOdo das kann sicherlich gelöscht werden weil wir ja wissen dass es sich um eine Datei und kein Verzeichnis handelt
-          If (pos(GetCurrentDirUTF8, trim(ParamStrUTF8(i))) = 1) Then Begin
-            sl := FindAllFiles(trim(ParamStrUTF8(i)), '', true);
-            For j := 0 To sl.Count - 1 Do Begin
-              fSourceFilelist.add(sl[j]);
-              fDestFileList.Add(copy(sl[j], length(GetCurrentDirUTF8) + 1, length(sl[j])));
-            End;
-            sl.free;
-          End
-          Else Begin
-            If DirectoryExistsUTF8(IncludeTrailingPathDelimiter(GetCurrentDirUTF8) + trim(ParamStrUTF8(i))) Then Begin
-              sl := FindAllFiles(IncludeTrailingPathDelimiter(GetCurrentDirUTF8) + trim(ParamStrUTF8(i)), '', true);
-              For j := 0 To sl.Count - 1 Do Begin
-                fSourceFilelist.add(sl[j]);
-                fDestFileList.Add(copy(sl[j], length(GetCurrentDirUTF8) + 1, length(sl[j])));
-              End;
-              sl.free;
-            End
-            Else Begin
-              // Es wurde ein Verzeichnis Übergeben wir schneiden den Namen aus und übergeben alles drunter
-              s := ExcludeTrailingPathDelimiter(trim(ParamStrUTF8(i)));
-              s := IncludeTrailingPathDelimiter(ExtractFilePath(s));
-              sl := FindAllFiles(trim(ParamStrUTF8(i)), '', true);
-              For j := 0 To sl.count - 1 Do Begin
-                fSourceFilelist.Add(sl[j]);
-                fDestFileList.add(copy(sl[j], length(s), length(sl[j])));
-              End;
-              sl.free;
-            End;
-          End;
-        End
-        Else Begin
-          If FileExistsUTF8(trim(ParamStrUTF8(i))) Then Begin
-            fSourceFilelist.Add(trim(ParamStrUTF8(i)));
-            fDestFileList.add(ExtractFileName(trim(ParamStrUTF8(i))));
-          End;
-        End;
-        Continue;
-      End;
-      If (trim(ParamStrUTF8(i)) = '*.*') Then Begin // Geöffnet im Alle Lokalen Dateien übertragen Modus
-        Log('Sent all files', llInfo);
-        sl := FindAllFiles(GetCurrentDirUTF8, '', false);
-        For j := 0 To sl.Count - 1 Do Begin
-          fSourceFilelist.Add(sl[j]);
-          fDestFileList.Add(copy(sl[j], length(GetCurrentDirUTF8) + 1, length(sl[j])));
-        End;
-        sl.free;
-        fFileSendInfo.FileSendState := fssReadyForNextFile;
-        fState := psTransferFiles;
-        aSocket.SendMessage('2'); // Steuercode 2 => Sende eine Beliebige Anzahl an Dateien
-        exit;
-      End;
-      If pos('*.', trim(ParamStrUTF8(i))) = 1 Then Begin // Geöffnet im Übertrage Alle Dateien der Art *.xyz
-        Log('Sent all files of type', llInfo);
-        sl := FindAllFiles(GetCurrentDirUTF8, trim(ParamStrUTF8(i)), false);
-        For j := 0 To sl.Count - 1 Do Begin
-          fSourceFilelist.add(sl[j]);
-          fDestFileList.Add(copy(sl[j], length(GetCurrentDirUTF8) + 1, length(sl[j])));
-        End;
-        sl.free;
-        fFileSendInfo.FileSendState := fssReadyForNextFile;
-        fState := psTransferFiles;
-        aSocket.SendMessage('2'); // Steuercode 2 => Sende eine Beliebige Anzahl an Dateien
-        exit;
-      End;
-      If (trim(ParamStrUTF8(i)) = '*') Then Begin // Geöffnet im Übertrage alle Dateien und Unterordner
-        Log('Sent all files and subfolders', llInfo);
-        sl := FindAllFiles(GetCurrentDirUTF8, '', true);
-        For j := 0 To sl.Count - 1 Do Begin
-          fSourceFilelist.add(sl[j]);
-          fDestFileList.Add(copy(sl[j], length(GetCurrentDirUTF8) + 1, length(sl[j])));
-        End;
-        sl.free;
-        fFileSendInfo.FileSendState := fssReadyForNextFile;
-        fState := psTransferFiles;
-        aSocket.SendMessage('2'); // Steuercode 2 => Sende eine Beliebige Anzahl an Dateien
-        exit;
-      End;
-    Until i >= Paramcount; // Ende Auslesen der Übergabeparameter
-    // Es bleint nur noch senden von Dateien oder Ping
-    If fSourceFilelist.Count > 0 Then Begin
-      Log('Sent file list', llInfo);
-      fFileSendInfo.FileSendState := fssReadyForNextFile;
-      fState := psTransferFiles;
-      aSocket.SendMessage('2'); // Steuercode 2 => Sende eine Beliebige Anzahl an Dateien
-    End
-    Else Begin
-      //Nur ein "Ping" und gleich wieder zu machen
-      Log('Sent a ping', llInfo);
-      fstate := psPing;
-      aSocket.SendMessage('0'); // Steuercode 0 => Ping, dann Beenden
-    End;
+Procedure TNPush.EndSession(Success: Boolean);
+Var
+  secs: Double;
+  s: String;
+  NextClient: TLSocket;
+Begin
+  If fProgressVisible Then Begin
+    writeln('');
+    fProgressVisible := false;
+    fProgressLen := 0;
+  End;
+  secs := (GetTickCount64 - fStatStart) / 1000;
+  s := format('%d file(s) sent, %d skipped, %s in %0.1f s', [fStatFiles, fStatSkipped, FormatSize(fStatBytes), secs]);
+  If secs > 0 Then s := s + ' (' + FormatSize(round(fStatBytes / secs)) + '/s)';
+  If Success Then Begin
+    LogShow('Done: ' + s, llInfo);
+  End
+  Else Begin
+    LogShow('Aborted: ' + s, llWarning);
+    SetExitStatus(ecError);
+  End;
+  If Assigned(fFileSendInfo.AktualFile) Then fFileSendInfo.AktualFile.Free;
+  fFileSendInfo.AktualFile := Nil;
+  fClient := Nil;
+  inc(fSessionCount);
+  If (MaxSessions <> 0) And (fSessionCount >= MaxSessions) Then Begin
+    fRunning := false;
+    exit;
+  End;
+  // Weiter mit dem nächsten npoll
+  fState := psWaitForConnection;
+  fHandleWaitForConnectionCounter := 0;
+  fWaitStart := GetTickCount64;
+  If MaxSessions = 0 Then Begin
+    LogShow(format('%d npoll(s) served, waiting for the next one, press ESC to exit.', [fSessionCount]), llInfo);
+  End
+  Else Begin
+    LogShow(format('%d of %d npoll(s) served, waiting for the next one...', [fSessionCount, MaxSessions]), llInfo);
+  End;
+  If fPending.Count > 0 Then Begin
+    NextClient := TLSocket(fPending[0]);
+    fPending.Delete(0);
+    StartSession(NextClient);
+  End;
+End;
+
+Procedure TNPush.OnTCPAcceptEvent(aSocket: TLSocket);
+Begin
+  Log('Got tcp connection from : ' + aSocket.PeerAddress, llTrace);
+  If fState = psWaitForConnection Then Begin
+    StartSession(aSocket);
+  End
+  Else Begin
+    // Wir bedienen gerade ein anderes npoll, dieses kommt danach dran
+    Log('Busy, queue : ' + aSocket.PeerAddress, llInfo);
+    fPending.Add(aSocket);
   End;
 End;
 
@@ -450,10 +636,9 @@ Var
 Begin
   If fFileSendInfo.FileSendState = fssReadyForNextFile Then Begin // Nur, wenn die Aktuelle Datei abgeschlossen ist gehts mit der nächsten weiter
     LogShow(fDestFileList[0], llInfo); // Dem User Anzeigen welche Datei als nächstes versendet werden soll
-    ftcp.IterReset;
-    ftcp.IterNext; // Skip Root Socket
-    If assigned(ftcp.Iterator) Then Begin
+    If assigned(fClient) Then Begin
       If Assigned(fFileSendInfo.AktualFile) Then fFileSendInfo.AktualFile.Free;
+      fFileSendInfo.AktualFile := Nil;
       If CheckMD5 Then Begin
         log('Create MD5 from : ' + fSourceFilelist[0], llTrace);
         md5 := MD5File(fSourceFilelist[0], BufferSize);
@@ -501,7 +686,7 @@ Begin
         fFileSendInfo.HeaderBytes[28 + i] := ord(fDestFileList[0][i]);
       End;
       // Generieren der Anfrage ob die Nächste Datei gesendet werden soll.
-      cnt2 := ftcp.Iterator.Send(fFileSendInfo.HeaderBytes[0], cnt);
+      cnt2 := fClient.Send(fFileSendInfo.HeaderBytes[0], cnt);
       If cnt2 = cnt Then Begin
         // Wir konnten alle Daten versenden
         setlength(fFileSendInfo.HeaderBytes, 0);
@@ -512,12 +697,12 @@ Begin
       Else Begin
         fFileSendInfo.HeaderBytePointer := cnt2;
         fFileSendInfo.FileSendState := fssWaitForHeaderTransfer;
-        ftcp.OnCanSend(ftcp.Iterator);
+        OnTCPCanSendEvent(fClient);
       End;
     End
     Else Begin
       log('No client to sent data to found.', llCritical);
-      fRunning := false;
+      EndSession(false);
     End;
   End;
 End;
@@ -529,6 +714,7 @@ Var
   i64: int64;
   SomethingWasRead: Boolean;
 Begin
+  If aSocket <> fClient Then exit; // Wartende npoll's senden nichts, bevor sie dran sind
   Repeat
     SomethingWasRead := false;
     Case fState Of
@@ -548,15 +734,18 @@ Begin
                       fFileSendInfo.FileSendState := fssWaitForResumeOffset;
                     End;
                   ord('N'): Begin
+                      inc(fStatSkipped);
                       fFileSendInfo.FileSendState := fssReadyForNextFile;
                     End;
                   ord('Y'): Begin
                       // Die Dateiübertragung kann Beginnen
-                      fFileSendInfo.FileSendState := fssFileTransfering;
+                      FileStarted;
                       OnTCPCanSendEvent(aSocket);
                     End;
                   ord('A'): Begin // Npoll hat ein Problem Abbruch
-                      fRunning := false;
+                      LogShow('npoll aborted the transfer.', llWarning);
+                      EndSession(false);
+                      exit;
                     End;
                 End;
               End;
@@ -575,7 +764,8 @@ Begin
                   End;
                   fFileSendInfo.Position := i64;
                   // Die Dateiübertragung setzt fort
-                  fFileSendInfo.FileSendState := fssFileTransfering;
+                  If i64 > 0 Then Log('Resume at : ' + FormatSize(i64), llInfo);
+                  FileStarted;
                   OnTCPCanSendEvent(aSocket);
                 End;
               End;
@@ -618,6 +808,17 @@ End;
 Procedure TNPush.OnTCPDisconnectEvent(aSocket: TLSocket);
 Begin
   Log('TCP disconnect', llTrace);
+  fPending.Remove(aSocket);
+  If (aSocket = fClient) And assigned(fClient) Then Begin
+    If fState = psTransferFiles Then Begin
+      LogShow('Connection to npoll lost.', llWarning);
+      EndSession(false);
+    End
+    Else Begin
+      fClient := Nil;
+      fRunning := false;
+    End;
+  End;
 End;
 
 Procedure TNPush.OnTCPCanSendEvent(aSocket: TLSocket);
@@ -626,6 +827,7 @@ Var
   Buffer: Array[0..BufferSize - 1] Of byte;
 Begin
   //  log('OnTCPCanSendEvent', llTrace); -- Sonst sind zu viele Logs drin
+  If aSocket <> fClient Then exit; // Nur an das npoll senden, das gerade bedient wird
   If fFileSendInfo.FileSendState = fssFileTransfering Then Begin
     Repeat
       cnt := min(BufferSize, fFileSendInfo.FileSize - fFileSendInfo.Position);
@@ -633,15 +835,19 @@ Begin
       fFileSendInfo.AktualFile.Read(Buffer, cnt);
       cnt := aSocket.Send(buffer, cnt);
       fFileSendInfo.Position := fFileSendInfo.Position + cnt;
+      fStatBytes := fStatBytes + cnt;
       If fFileSendInfo.Position >= fFileSendInfo.FileSize Then Begin
         cnt := 0;
+        inc(fStatFiles);
+        If fProgressVisible Then ShowProgress(true);
         fFileSendInfo.FileSendState := fssReadyForNextFile;
       End;
     Until cnt = 0;
   End;
   If fFileSendInfo.FileSendState = fssWaitForHeaderTransfer Then Begin
     cnt := aSocket.Send(fFileSendInfo.HeaderBytes[fFileSendInfo.HeaderBytePointer], length(fFileSendInfo.HeaderBytes) - fFileSendInfo.HeaderBytePointer);
-    If fFileSendInfo.HeaderBytePointer + cnt = length(fFileSendInfo.HeaderBytes) Then Begin
+    fFileSendInfo.HeaderBytePointer := fFileSendInfo.HeaderBytePointer + cnt;
+    If fFileSendInfo.HeaderBytePointer = length(fFileSendInfo.HeaderBytes) Then Begin
       setlength(fFileSendInfo.HeaderBytes, 0);
       fFileSendInfo.FileSendState := fssWaitForCRCResponse;
       fSourceFilelist.Delete(0);
@@ -664,6 +870,7 @@ Begin
     logshow('UDP: ' + msg, llWarning);
   End;
   logshow('UDP Error, you have to start npoll first.', llFatal);
+  SetExitStatus(ecError);
   fRunning := false;
 End;
 
@@ -675,8 +882,18 @@ Begin
   Else Begin
     logshow('TCP: ' + msg, llWarning);
   End;
+  If assigned(aSocket) And (fPending.IndexOf(aSocket) <> -1) Then Begin
+    // Ein wartendes npoll ist weg, das stört die anderen nicht
+    fPending.Remove(aSocket);
+    exit;
+  End;
+  If assigned(aSocket) And (aSocket = fClient) And (fState = psTransferFiles) Then Begin
+    // Nur diese Sitzung ist kaputt, bei -m geht es mit dem nächsten npoll weiter
+    EndSession(false);
+    exit;
+  End;
+  SetExitStatus(ecError);
   fRunning := false;
 End;
 
 End.
-

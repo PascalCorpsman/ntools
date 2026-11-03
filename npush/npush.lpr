@@ -21,7 +21,7 @@ Uses
   cthreads,
   cmem,
 {$ENDIF}{$ENDIF}
-  Classes, sysutils, unpush, ulogger, lNet
+  Classes, sysutils, math, unpush, ulogger, lNet
   ;
 
 {$I ../ntools.inc}
@@ -29,7 +29,8 @@ Uses
 Var
   Port, i: integer;
   np: TNPush;
-  CheckMD5, AppendData: Boolean;
+  CheckMD5, AppendData, Quiet: Boolean;
+  MaxSessions, Timeout, rc: integer;
   BIP: String;
 
 Begin
@@ -40,6 +41,9 @@ Begin
   // logger.SetLogLevel(0); // Debug to be removed
   CheckMD5 := false;
   AppendData := false;
+  Quiet := false;
+  MaxSessions := 1;
+  Timeout := 0;
   Port := DefaultPort;
   bip := LADDR_BR;
   For i := 1 To Paramcount Do Begin
@@ -64,9 +68,16 @@ Begin
       writeln(' -md5       : Use MD5 Checksum to proove if transfer is needed');
       writeln(' -a         : Append data to files, that are not transfered complete');
       writeln(' -i         : Overwrite broadcast ip for udp connection');
+      writeln(' -q         : Do not show the progress automatically');
+      writeln(' -t <sec>   : Give up if no npoll is found within <sec> seconds');
+      writeln(' -m <n>     : Send to <n> npoll''s one after another, 0 = until ESC');
+      writeln('              (every connection counts, also a second one of the same npoll)');
       writeln('');
       writeln('Info while file transfer:');
-      writeln(' i          : show progress');
+      writeln(' i          : show progress (also with -q)');
+      writeln('');
+      writeln('Exit codes:');
+      writeln(' 0 = ok, 1 = aborted by user, 2 = error, 3 = no npoll found (-t)');
       halt;
     End;
     If lowercase(ParamStr(i)) = '-l' Then Begin // Überschreiben Loglevel
@@ -77,6 +88,15 @@ Begin
     End;
     If lowercase(ParamStr(i)) = '-a' Then Begin // Aktivieren Append Modus
       AppendData := true;
+    End;
+    If lowercase(ParamStr(i)) = '-q' Then Begin // Keine automatische Fortschrittsanzeige
+      Quiet := true;
+    End;
+    If lowercase(ParamStr(i)) = '-t' Then Begin // Timeout für die Suche nach npoll
+      Timeout := max(0, strtointdef(ParamStr(i + 1), 0));
+    End;
+    If lowercase(ParamStr(i)) = '-m' Then Begin // Mehrere npoll's nacheinander bedienen
+      MaxSessions := max(0, strtointdef(ParamStr(i + 1), 1));
     End;
     If lowercase(paramstr(i)) = '-p' Then Begin // Force IP Modus Aktivieren
       Port := strtointdef(paramstr(i + 1), DefaultPort);
@@ -91,8 +111,13 @@ Begin
   np.CheckMD5 := CheckMD5;
   np.AppendData := AppendData;
   np.UDPBroadCastIP := bip;
+  np.Quiet := Quiet;
+  np.MaxSessions := MaxSessions;
+  np.Timeout := Timeout;
   np.Execute;
+  rc := np.ExitStatus;
   np.free;
+  halt(rc);
   //  writeln('Finish..'); // Debug to be removed
   //  readln(); // Debug to be removed
 End.

@@ -39,13 +39,23 @@
 (*                      werden.                                               *)
 (*               0.09 - ver 0.08 war immer noch nicht "korrekt", nun wieder   *)
 (*                      getestet auf windows / Linux                          *)
+(*               0.10 - Fortschrittsanzeige, Zusammenfassung, Exit-Codes      *)
+(*                      Optionen -q, -t (beide), -m (npush), -n (npoll)       *)
+(*                      -md5 prüft die Datei auch nach der Übertragung        *)
+(*                      Windows: Timer auf 1ms, ca. 8x schnellere Übertragung *)
 (*                                                                            *)
 (******************************************************************************)
 Const
-  Version = '0.09';
+  Version = '0.10';
   //  BufferSize = 32768; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
   BufferSize = 16384; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 12.000.000
   //  BufferSize = 8192;  // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
   //  BufferSize = 4096;  // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128
   DefaultPort = 8002;
+
+  // Exit-Codes von npush und npoll
+  ecOK = 0; // Alles erledigt
+  ecUserAbort = 1; // Abbruch durch den Benutzer (ESC)
+  ecError = 2; // Fehler, z.B. Datei nicht gefunden, Verbindung abgebrochen, MD5 falsch
+  ecNoPartner = 3; // Innerhalb des Timeouts (-t) wurde keine Gegenstelle gefunden
 
