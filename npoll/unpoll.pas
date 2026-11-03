@@ -90,9 +90,12 @@ Implementation
 
 Uses ulogger, crt, math, lazutf8, LazFileUtils;
 
+Const
+  MaxFilenameLen = 32767; // Mehr kann auch Windows mit "\\?\" Prefix nicht
+
 Function FixDelimeters(value: String): String;
 Begin
-{$IFDEF Linux}
+{$IFDEF UNIX}
   result := StringReplace(value, '\', '/', [rfReplaceAll]);
 {$ELSE}
   result := StringReplace(value, '/', '\', [rfReplaceAll]);
@@ -205,7 +208,7 @@ Begin
     Case fState Of
       psWaitForConnection: Begin
           HandleWaitForConnection;
-          If ForceIP <> '' Then Begin
+          If frunning And (ForceIP <> '') Then Begin // frunning = false -> Benutzer hat ESC gedrückt
             ConnectTCPToIP(ForceIP);
             frunning := true; // ConnectTCPToIP bricht ab, wenn es nicht verbinden kann, das soll hier natürlich nicht passieren.
           End;
@@ -323,6 +326,13 @@ Begin
                     fFileReceiveInfo.FileSize := fFileReceiveInfo.FileSize Or fFileReceiveInfo.HeaderHeaderBytes[16 + i];
                   End;
                   strLen := (fFileReceiveInfo.HeaderHeaderBytes[24] Shl 24) Or (fFileReceiveInfo.HeaderHeaderBytes[25] Shl 16) Or (fFileReceiveInfo.HeaderHeaderBytes[26] Shl 8) Or (fFileReceiveInfo.HeaderHeaderBytes[27] Shl 0);
+                  If (strLen <= 0) Or (strLen > MaxFilenameLen) Then Begin
+                    // Ungültige Länge, die Gegenstelle ist kein npush oder spricht ein anderes Protokoll
+                    logshow('Error invalid filename length : ' + inttostr(strLen), llFatal);
+                    ftcp.SendMessage('A');
+                    frunning := false;
+                    exit;
+                  End;
                   fFileReceiveInfo.HeaderBytesFilenameLen := strLen;
                   fFileReceiveInfo.Filename := '';
                   fFileReceiveInfo.FileReceiveState := frsReceiveHeaderFilename;
@@ -330,13 +340,14 @@ Begin
                 End;
               End;
             frsReceiveHeaderFilename: Begin
-                cnt := aSocket.Get(buffer, fFileReceiveInfo.HeaderBytesFilenameLen - length(fFileReceiveInfo.Filename));
+                cnt := aSocket.Get(buffer, min(BufferSize, fFileReceiveInfo.HeaderBytesFilenameLen - length(fFileReceiveInfo.Filename)));
                 If cnt > 0 Then SomethingWasReceived := true;
                 For i := 0 To cnt - 1 Do Begin
                   fFileReceiveInfo.Filename := fFileReceiveInfo.Filename + chr(buffer[i]);
                 End;
                 If length(fFileReceiveInfo.Filename) = fFileReceiveInfo.HeaderBytesFilenameLen Then Begin
                   HandleCheckIfFileNeedsToBeTransfered;
+                  If Not frunning Then exit; // Abbruch (z.B. ungültiger Dateiname), sonst würde hier mit Länge 0 weiter gelesen
                 End;
               End;
           End;
@@ -489,14 +500,16 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
     End;
     fFileReceiveInfo.FileReceiveState := frsReceiveFile;
     If fFileReceiveInfo.AppendData And FileExistsUTF8(Filename) Then Begin
+      fFileReceiveInfo.AktualFile := TFileStream.Create(UTF8ToSys(Filename), fmOpenWrite);
       If fFileReceiveInfo.AktualFile.Size = fFileReceiveInfo.FileSize Then Begin
         // Die Datei gibts schon Vollständig
+        fFileReceiveInfo.AktualFile.free;
+        fFileReceiveInfo.AktualFile := Nil;
         log('File already completed', llInfo);
         fFileReceiveInfo.FileReceiveState := frsWaitForNextFile;
         ftcp.SendMessage('N'); // Wir haben die Datei schon, die nächste bitte
       End
       Else Begin
-        fFileReceiveInfo.AktualFile := TFileStream.Create(UTF8ToSys(Filename), fmOpenWrite);
         If fFileReceiveInfo.AktualFile.Size < fFileReceiveInfo.FileSize Then Begin
           // Es fehlt noch ein Stück der Datei
           fFileReceiveInfo.AktualFile.Position := fFileReceiveInfo.AktualFile.Size;
@@ -505,6 +518,9 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
         End
         Else Begin
           // Die ZielDatei ist Größer als die gesendete, da müssen wir die Datei komplett hohlen
+          // und den alten Rest abschneiden, sonst bleibt er am Ende stehen
+          fFileReceiveInfo.AktualFile.Size := 0;
+          fFileReceiveInfo.Position := 0;
           i64 := 0;
         End;
         fFileReceiveInfo.Filename := Filename;
@@ -528,11 +544,19 @@ Procedure TNPoll.HandleCheckIfFileNeedsToBeTransfered;
   End;
 
 Var
-  s: String;
+  s, Base: String;
   md5: TMD5Digest;
 Begin
-  s := IncludeTrailingPathDelimiter(GetCurrentDirUTF8) + FixDelimeters(fFileReceiveInfo.Filename);
+  Base := IncludeTrailingPathDelimiter(ExpandFileNameUTF8(GetCurrentDirUTF8));
+  s := ExpandFileNameUTF8(Base + FixDelimeters(fFileReceiveInfo.Filename));
   logshow(FixDelimeters(fFileReceiveInfo.Filename), llInfo);
+  If (pos(Base, s) <> 1) Or (length(s) <= length(Base)) Then Begin
+    // Der Dateiname zeigt via ".." aus dem aktuellen Verzeichnis heraus, das darf nicht sein
+    logshow('Error filename points outside of the current directory : ' + fFileReceiveInfo.Filename, llFatal);
+    ftcp.SendMessage('A');
+    frunning := false;
+    exit;
+  End;
   If FileExistsUTF8(s) And (fFileReceiveInfo.CheckMD5) Then Begin
     log('File already exists, check MD5', llTrace);
     md5 := MD5File(s);

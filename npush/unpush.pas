@@ -35,6 +35,7 @@ Type
   TFileSendState = (
     fssReadyForNextFile, // Alles Aktuelle ist Abgearbeitet, Starten mit der Nächste zu übertragenden Datei
     fssWaitForCRCResponse, // Anfrage bei Npoll ob die Datei gesendert werden soll
+    fssWaitForResumeOffset, // Npoll will fortsetzen, Empfangen der 8 Byte Position (kann in Teilen kommen)
     fssWaitForHeaderTransfer, // Warten bis wir den Header vollständig übertragen haben
     fssFileTransfering // Die Aktuelle Datei wird übertragen
     );
@@ -46,6 +47,8 @@ Type
     FileSize: int64;
     HeaderBytes: Array Of byte;
     HeaderBytePointer: Integer;
+    ResumeBytes: Array[0..7] Of byte;
+    ResumeBytesPointer: Integer;
   End;
 
   { TNPush }
@@ -203,7 +206,15 @@ Begin
     Else Begin
       n := GetLocalIPs();
       For i := 0 To high(n) Do Begin
-        bip := CalculateBroadCastAddressFromAddress(n[i].IpAddress, n[i].SubnetMask);
+        Try
+          bip := CalculateBroadCastAddressFromAddress(n[i].IpAddress, n[i].SubnetMask);
+        Except
+          On e: Exception Do Begin
+            // Ein Adapter mit unbrauchbaren Daten darf nicht alle anderen verhindern
+            logger.Log('Skip adapter ' + n[i].AdapterName + ': ' + e.Message, llWarning);
+            Continue;
+          End;
+        End;
         logger.Log('Ping to : ' + bip, llTrace);
         fudp.SendMessage(Welcome_Message, bip);
       End;
@@ -527,30 +538,14 @@ Begin
                 cnt := aSocket.Get(buffer, 1);
                 If cnt > 0 Then SomethingWasRead := true;
                 If cnt <> 1 Then Begin
-                  aSocket.Eventer.CallAction;
-                  cnt := aSocket.Get(buffer, 1);
-                  // fRunning := false;
+                  // Noch keine Antwort da, der nächste OnReceive liefert sie
                   exit;
                 End;
                 Case buffer[0] Of
                   8: Begin
-                      cnt := aSocket.Get(buffer, 8);
-                      If cnt > 0 Then SomethingWasRead := true;
-                      If cnt = 8 Then Begin
-                        i64 := 0;
-                        For i := 0 To 7 Do Begin
-                          i64 := i64 Shl 8;
-                          i64 := i64 Or buffer[i];
-                        End;
-                        fFileSendInfo.Position := i64;
-                        // Die Dateiübertragung setzt fort
-                        fFileSendInfo.FileSendState := fssFileTransfering;
-                        OnTCPCanSendEvent(aSocket);
-                      End
-                      Else Begin
-                        fRunning := false;
-                        Raise Exception.Create('Verdammt FileSize nicht Vollständig empfangen.');
-                      End;
+                      // Die Position kommt danach, evtl. aufgeteilt auf mehrere Pakete
+                      fFileSendInfo.ResumeBytesPointer := 0;
+                      fFileSendInfo.FileSendState := fssWaitForResumeOffset;
                     End;
                   ord('N'): Begin
                       fFileSendInfo.FileSendState := fssReadyForNextFile;
@@ -563,6 +558,25 @@ Begin
                   ord('A'): Begin // Npoll hat ein Problem Abbruch
                       fRunning := false;
                     End;
+                End;
+              End;
+            fssWaitForResumeOffset: Begin
+                cnt := aSocket.Get(buffer, 8 - fFileSendInfo.ResumeBytesPointer);
+                If cnt > 0 Then SomethingWasRead := true;
+                For i := 0 To cnt - 1 Do Begin
+                  fFileSendInfo.ResumeBytes[fFileSendInfo.ResumeBytesPointer + i] := buffer[i];
+                End;
+                fFileSendInfo.ResumeBytesPointer := fFileSendInfo.ResumeBytesPointer + cnt;
+                If fFileSendInfo.ResumeBytesPointer = 8 Then Begin
+                  i64 := 0;
+                  For i := 0 To 7 Do Begin
+                    i64 := i64 Shl 8;
+                    i64 := i64 Or fFileSendInfo.ResumeBytes[i];
+                  End;
+                  fFileSendInfo.Position := i64;
+                  // Die Dateiübertragung setzt fort
+                  fFileSendInfo.FileSendState := fssFileTransfering;
+                  OnTCPCanSendEvent(aSocket);
                 End;
               End;
           End;
