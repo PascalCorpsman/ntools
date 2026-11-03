@@ -241,9 +241,9 @@ and set its default value to the full path of `npoll.exe`, e.g. `"C:\Tools\npoll
 
 ## Binary download
 
-If you do not want to build the programs yourself (may be an older version than this repository):
+Download prebuilt binaries of **npoll** and **npush** for **Windows64** and **Linux64** from the latest GitHub release:
 
-<https://www.corpsman.de/klickcounter.php?url=download/ntools.zip>
+<https://github.com/PascalCorpsman/ntools/releases/latest>
 
 ## License
 

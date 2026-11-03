@@ -1,7 +1,7 @@
 (******************************************************************************)
-(* npush                                                           ??.??.???? *)
+(* ntools                                                          ??.??.???? *)
 (*                                                                            *)
-(* Version     : 0.09                                                         *)
+(* Version     : 0.10                                                         *)
 (*                                                                            *)
 (* Author      : Uwe Schächterle (Corpsman)                                   *)
 (*                                                                            *)
@@ -45,8 +45,9 @@
 (*                      Windows: Timer auf 1ms, ca. 8x schnellere Übertragung *)
 (*                                                                            *)
 (******************************************************************************)
+
 Const
-  Version = '0.10';
+  Version = '0.10'; // Versionsnummer erst bei Änderungen hoch ziehen !
   //  BufferSize = 32768; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
   BufferSize = 16384; // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 12.000.000
   //  BufferSize = 8192;  // ACHTUNG darf auf keinen Fall größer sein wie 65536, oder Kleiner als 128 => 4.800.000
